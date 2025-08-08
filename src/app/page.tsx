@@ -4,22 +4,16 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
 import { processEmails as runProcessEmails } from '../lib/process-emails';
 import type { EmailTask } from '../lib/process-emails';
-import dynamic from 'next/dynamic';
-
 
 let gapi: any = undefined;
 
-
-// --- UI Types ---
 interface UserProfile { email: string; name: string; picture: string; }
 
-// --- Configuration ---
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID!;
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY!;
 const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets';
 const POA_EMAIL_SENDER = 'csao.poa@dlsl.edu.ph';
 
-// --- Main Application Component ---
 function App() { return (<GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}><Home /></GoogleOAuthProvider>); }
 
 const Home: React.FC = () => {
@@ -39,7 +33,7 @@ const Home: React.FC = () => {
     let isMounted = true;
 
     async function start() {
-      gapi = (await import('gapi-script')).default;
+      gapi = (await import('gapi-script')).gapi;
     }
 
     start().then(() => {
