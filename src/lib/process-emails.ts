@@ -1,7 +1,4 @@
-// Business logic for processing POA emails and writing to Google Sheets
-// Kept UI-agnostic via callbacks.
-
-import { gapi } from 'gapi-script';
+"use client";
 
 interface ActivityDetails {
     title: string;
@@ -227,7 +224,7 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 };
 
 // --- Email parsing ---
-async function fetchAndParseEmail(messageId: string, callbacks: Callbacks): Promise<ParsedResult> {
+async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks): Promise<ParsedResult> {
     try {
         callbacks.updateTask(messageId, { status: 'fetching' });
         const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
@@ -268,7 +265,7 @@ export type ProcessEmailsParams = {
     callbacks: Callbacks;
 };
 
-export async function processEmails(params: ProcessEmailsParams): Promise<{ processed: number }> {
+export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
     const { spreadsheetId, senderEmail, useDateFilter, callbacks } = params;
 
     // --- Phase 1: Fetch emails ---
@@ -315,7 +312,7 @@ export async function processEmails(params: ProcessEmailsParams): Promise<{ proc
     const parsedResults: ParsedResult[] = [];
     for (let i = 0; i < newMessages.length; i += 5) {
         const chunk = newMessages.slice(i, i + 5);
-        parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(msg.id!, callbacks))));
+        parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks))));
     }
     const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
     const successfulIds = successfulResults.map(p => p.data.messageId);

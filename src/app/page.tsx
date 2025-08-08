@@ -31,11 +31,18 @@ const Home: React.FC = () => {
   const [spreadsheetId, setSpreadsheetId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [useDateFilter, setUseDateFilter] = useState(true);
+
+
+
   useEffect(() => {
     if (!accessToken) return;
     let isMounted = true;
-    import('gapi-script').then((mod) => {
-      gapi = mod.gapi;
+
+    async function start() {
+      gapi = (await import('gapi-script')).default;
+    }
+
+    start().then(() => {
       if (!isMounted) return;
       gapi.load('client', async () => {
         gapi.client.setApiKey(API_KEY);
@@ -73,7 +80,7 @@ const Home: React.FC = () => {
     setIsProcessing(true);
     setTasks([]);
     try {
-      await runProcessEmails({
+      await runProcessEmails(gapi, {
         spreadsheetId,
         senderEmail: POA_EMAIL_SENDER,
         useDateFilter,
