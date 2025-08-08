@@ -2,9 +2,13 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
-import { gapi } from 'gapi-script';
 import { processEmails as runProcessEmails } from '../lib/process-emails';
 import type { EmailTask } from '../lib/process-emails';
+import dynamic from 'next/dynamic';
+
+
+let gapi: any = undefined;
+
 
 // --- UI Types ---
 interface UserProfile { email: string; name: string; picture: string; }
@@ -27,15 +31,20 @@ const Home: React.FC = () => {
   const [spreadsheetId, setSpreadsheetId] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [useDateFilter, setUseDateFilter] = useState(true);
-
   useEffect(() => {
     if (!accessToken) return;
-    gapi.load('client', async () => {
-      gapi.client.setApiKey(API_KEY);
-      gapi.client.setToken({ access_token: accessToken });
-      await gapi.client.load('https://gmail.googleapis.com/$discovery/rest?version=v1');
-      await gapi.client.load('https://sheets.googleapis.com/$discovery/rest?version=v4');
+    let isMounted = true;
+    import('gapi-script').then((mod) => {
+      gapi = mod.gapi;
+      if (!isMounted) return;
+      gapi.load('client', async () => {
+        gapi.client.setApiKey(API_KEY);
+        gapi.client.setToken({ access_token: accessToken });
+        await gapi.client.load('https://gmail.googleapis.com/$discovery/rest?version=v1');
+        await gapi.client.load('https://sheets.googleapis.com/$discovery/rest?version=v4');
+      });
     });
+    return () => { isMounted = false; };
   }, [accessToken]);
 
   const login = useGoogleLogin({
