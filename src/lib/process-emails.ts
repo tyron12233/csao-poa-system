@@ -138,19 +138,18 @@ const parseEmailBody = (htmlBody: string) => {
     };
 };
 
-const parseDateWithInferredYear = (dateString: string): Date | null => {
-    if (!dateString || dateString === 'Not Found') {
-        return null;
-    }
+// Infer academic year based on configured academic year start (month 1-12) & start year.
+const parseDateWithAcademicYear = (dateString: string, acadYearStartYear: number, acadYearStartMonth: number): Date | null => {
+    if (!dateString || dateString === 'Not Found') return null;
     const d = new Date(dateString);
-    if (isNaN(d.getTime())) {
-        return null;
-    }
-    const now = new Date();
-    if (d.getFullYear() < now.getFullYear() - 5) {
-        let y = now.getFullYear();
-        if (d.getMonth() < now.getMonth()) { y += 1; }
-        d.setFullYear(y);
+    if (isNaN(d.getTime())) return null;
+    // Academic year spans from startMonth/startYear to (startMonth-1)/(startYear+1)
+    const monthIndex = d.getMonth(); // 0-based
+    // If date year outside allowed academic year range, remap.
+    const allowedYears = new Set([acadYearStartYear, acadYearStartYear + 1]);
+    if (!allowedYears.has(d.getFullYear())) {
+        const targetYear = (monthIndex + 1) >= acadYearStartMonth ? acadYearStartYear : (acadYearStartYear + 1);
+        d.setFullYear(targetYear);
     }
     return d;
 };
@@ -224,7 +223,7 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 };
 
 // --- Email parsing ---
-async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks, uploadFolderId?: string): Promise<ParsedResult> {
+async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks, uploadFolderId: string | undefined, acadYearStartYear: number, acadYearStartMonth: number): Promise<ParsedResult> {
     try {
         callbacks.updateTask(messageId, { status: 'fetching' });
         const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
@@ -235,8 +234,8 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         if (!htmlBody) throw new Error('HTML body not found.');
 
         const parsedData = parseEmailBody(htmlBody);
-        const startDate = parseDateWithInferredYear(parsedData.startDate);
-        const endDate = parseDateWithInferredYear(parsedData.endDate);
+        const startDate = parseDateWithAcademicYear(parsedData.startDate, acadYearStartYear, acadYearStartMonth);
+        const endDate = parseDateWithAcademicYear(parsedData.endDate, acadYearStartYear, acadYearStartMonth);
         if (!startDate || !endDate) throw new Error(`Invalid dates for: ${parsedData.title}`);
 
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
@@ -325,17 +324,28 @@ export type ProcessEmailsParams = {
     senderEmail: string;
     useDateFilter: boolean;
     uploadFolderId?: string; // target Drive folder for PDFs
+    academicYearStartMonth: number; // 1-12
+    academicYearStartYear: number; // e.g. 2025
+    manualStartDate?: string; // ISO date (yyyy-mm-dd) to override earliest email fetch
     callbacks: Callbacks;
 };
 
 export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
-    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, callbacks } = params;
+    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, academicYearStartMonth, academicYearStartYear, manualStartDate, callbacks } = params;
 
     // --- Phase 1: Fetch emails ---
     let gmailQuery = `from:${senderEmail} "POA" "The request is now complete."`;
     const processedIds = new Set<string>();
 
-    if (useDateFilter) {
+    if (manualStartDate) {
+        // Manual start date takes precedence; convert to unix timestamp (start of day)
+        const start = new Date(manualStartDate + 'T00:00:00');
+        if (!isNaN(start.getTime())) {
+            const unix = Math.floor(start.getTime() / 1000);
+            gmailQuery += ` after:${unix}`;
+            callbacks.status(`Filtering emails after manual start date ${start.toLocaleDateString()}`);
+        }
+    } else if (useDateFilter) {
         try {
             const logData = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId, range: `${LOG_SHEET_NAME}!A2:B` });
             const logRows: any[] = logData.result.values || [];
@@ -400,7 +410,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         const parsedResults: ParsedResult[] = [];
         for (let i = 0; i < batchMessages.length; i += 5) {
             const chunk = batchMessages.slice(i, i + 5);
-            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks, uploadFolderId))));
+            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks, uploadFolderId, academicYearStartYear, academicYearStartMonth))));
         }
         const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
         const successfulIds = successfulResults.map(p => p.data.messageId);
@@ -484,89 +494,5 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
 }
 
 // --- Simulation (no Gmail dependency) ---
-export async function processFakeEmails(gapi: any, params: Omit<ProcessEmailsParams, 'senderEmail' | 'useDateFilter'> & { count: number }): Promise<{ processed: number }> {
-    const { spreadsheetId, callbacks, count } = params;
-    const BATCH_SIZE = 10;
-    const totalBatches = Math.ceil(count / BATCH_SIZE);
-
-    // Create fake queued tasks
-    const fakeIds = Array.from({ length: count }, (_, i) => `FAKE-${Date.now()}-${i}`);
-    callbacks.queue(fakeIds.map(id => ({ id, subject: 'Simulated Email', status: 'queued' })));
-
-    let processed = 0;
-    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-        const start = batchIndex * BATCH_SIZE;
-        const batchIds = fakeIds.slice(start, start + BATCH_SIZE);
-        callbacks.status(`Simulating batch ${batchIndex + 1} of ${totalBatches} (${batchIds.length} emails)...`);
-        callbacks.updateTasksBulk(batchIds, { status: 'parsing' });
-
-        // Build synthetic results (spread randomly across current and next month)
-        const now = new Date();
-        const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-        const monthSheetNames = [formatMonthYear(now), formatMonthYear(next)];
-
-        const dataBySheet = new Map<string, any[][]>();
-        monthSheetNames.forEach(name => dataBySheet.set(name, []));
-        batchIds.forEach(id => {
-            const rowData = ['UNSET', 'Sim Org', `Sim Activity ${id}`, 'Synthetic description', now.toISOString().slice(0, 10), next.toISOString().slice(0, 10), '08:00-10:00', 'Campus', 'Type', '', ''];
-            monthSheetNames.forEach(name => dataBySheet.get(name)!.push(rowData));
-        });
-
-        const neededSheetNames = new Set<string>([LOG_SHEET_NAME, ...monthSheetNames]);
-        const initialSheetProps = await gapi.client.sheets.spreadsheets.get({ spreadsheetId });
-        const existingSheets = new Map<string, any>(initialSheetProps.result.sheets?.map((s: any) => [s.properties.title, { sheetId: s.properties.sheetId }]));
-        const sheetsToCreate = [...neededSheetNames].filter(name => !existingSheets.has(name));
-        if (sheetsToCreate.length > 0) {
-            callbacks.status('Creating sheets for simulation...');
-            const createRequests = sheetsToCreate.map(title => ({ addSheet: { properties: { title } } }));
-            const createResult = await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: createRequests } });
-            const headerRequests: any[] = [];
-            createResult.result.replies?.forEach((reply: any) => {
-                const props = reply.addSheet.properties;
-                existingSheets.set(props.title, { sheetId: props.sheetId });
-                const headers = props.title === LOG_SHEET_NAME ? LOG_HEADERS : MONTHLY_HEADERS;
-                headerRequests.push(...generateHeaderRequests(props.sheetId, headers));
-            });
-            if (headerRequests.length > 0) {
-                await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: headerRequests } });
-            }
-        }
-
-        const sheetState = new Map<string, { sheetId: number, lastRow: number }>();
-        const valueRangesToGet = [...neededSheetNames].filter(name => existingSheets.has(name)).map(name => `${name}!A:A`);
-        if (valueRangesToGet.length > 0) {
-            const sheetValues = await gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: valueRangesToGet });
-            sheetValues.result.valueRanges?.forEach((rangeResult: any) => {
-                const sheetName = rangeResult.range.split('!')[0].replace(/'/g, '');
-                const lastRow = rangeResult.values?.length || 0;
-                if (existingSheets.has(sheetName)) {
-                    sheetState.set(sheetName, { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow });
-                }
-            });
-        }
-
-        const masterRequest: any[] = [];
-        for (const [sheetName, rows] of dataBySheet.entries()) {
-            const state = sheetState.get(sheetName);
-            if (!state) continue;
-            masterRequest.push({ appendDimension: { sheetId: state.sheetId, dimension: 'ROWS', length: rows.length } });
-            for (let i = 0; i < rows.length; i++) {
-                masterRequest.push(...generateRowRequests(state.sheetId, state.lastRow + i, rows[i]));
-            }
-        }
-        if (masterRequest.length > 0) {
-            callbacks.status('Writing simulated rows...');
-            callbacks.updateTasksBulk(batchIds, { status: 'writing' });
-            await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: masterRequest } });
-        }
-        const logRows = batchIds.map(id => [new Date().toISOString(), id, 'Simulated', 'Sim Org', `Sim Activity ${id}`]);
-        await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: LOG_SHEET_NAME, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
-        callbacks.updateTasksBulk(batchIds, { status: 'done' });
-        processed += batchIds.length;
-        callbacks.status(`Simulation batch ${batchIndex + 1} complete. Total simulated: ${processed}`);
-    }
-    callbacks.status(`Simulation complete. ${processed} fake emails processed.`);
-    return { processed };
-}
 
 export const SheetsConfig = { LOG_SHEET_NAME, LOG_HEADERS, MONTHLY_HEADERS };

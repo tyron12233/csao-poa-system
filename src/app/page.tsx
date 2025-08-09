@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
-import { processEmails as runProcessEmails, processFakeEmails } from '../lib/process-emails';
+import { processEmails as runProcessEmails } from '../lib/process-emails';
 import type { EmailTask } from '../lib/process-emails';
 
 // Import reusable UI components
@@ -64,6 +64,9 @@ const Home: React.FC = () => {
   const [isLoadingFolders, setIsLoadingFolders] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [folderError, setFolderError] = useState<string | null>(null);
+  const [acadStartMonth, setAcadStartMonth] = useState<number>(7); // default July
+  const [acadStartYear, setAcadStartYear] = useState<number>(new Date().getFullYear());
+  const [manualStartDate, setManualStartDate] = useState<string>('');
   const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load cached token/user on first mount
@@ -187,6 +190,9 @@ const Home: React.FC = () => {
         senderEmail: POA_EMAIL_SENDER,
         useDateFilter,
         uploadFolderId: uploadFolderId || undefined,
+        academicYearStartMonth: acadStartMonth,
+        academicYearStartYear: acadStartYear,
+        manualStartDate: manualStartDate || undefined,
         callbacks: {
           status: (msg: string) => setStatusMessage(msg),
           queue: (newTasks: EmailTask[]) => setTasks(newTasks),
@@ -205,35 +211,7 @@ const Home: React.FC = () => {
     }
   }, [spreadsheetId, useDateFilter]);
 
-  const handleSimulateEmails = useCallback(async () => {
-    if (!spreadsheetId) {
-      setError('Please select a Google Sheet first.');
-      return;
-    }
-    setError(null);
-    setStatusMessage('Starting simulation...');
-    setIsProcessing(true);
-    setTasks([]);
-    try {
-      await processFakeEmails(gapi, {
-        spreadsheetId,
-        count: 25, // simulate 25 emails (processed in batches of 10)
-        uploadFolderId: uploadFolderId || undefined,
-        callbacks: {
-          status: (msg: string) => setStatusMessage(msg),
-          queue: (newTasks: EmailTask[]) => setTasks(newTasks),
-          updateTask: (id: string, patch: Partial<EmailTask>) =>
-            setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t))),
-          updateTasksBulk: (ids: string[], patch: Partial<EmailTask>) =>
-            setTasks((prev) => prev.map((t) => (ids.includes(t.id) ? { ...t, ...patch } : t))),
-        },
-      });
-    } catch (err: any) {
-      setError(err.result?.error?.message || err.message || 'Simulation error.');
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [spreadsheetId]);
+  // Simulation handler removed per requirement to remove simulate processing feature.
 
   // Helper: parse spreadsheet ID from either raw ID or full URL
   const extractSpreadsheetId = (val: string): string | null => {
@@ -476,20 +454,39 @@ const Home: React.FC = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid gap-4 sm:grid-cols-3 bg-gray-100 rounded-2xl p-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Academic Year Start Month</label>
+                <select
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={acadStartMonth}
+                  onChange={(e) => setAcadStartMonth(Number(e.target.value))}
+                >
+                  {['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].slice(1).map((m, i) => (
+                    <option key={m} value={i + 1}>{m}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Academic Year Start Year</label>
+                <Input type="number" value={acadStartYear} onChange={(e) => setAcadStartYear(Number(e.target.value))} placeholder="2025" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Manual Earliest Email Date (override)</label>
+                <Input type="date" value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)} />
+              </div>
+              <div className="sm:col-span-3 text-[11px] text-gray-500 leading-snug">
+                The academic year sets how incomplete or ambiguous year values in emails are inferred. Manual date (if set) restricts Gmail query to messages after that day.
+              </div>
+            </div>
+
+            <div className="mt-4">
               <Button
                 onClick={handleProcessEmails}
                 disabled={isProcessing || !spreadsheetId}
                 fullWidth
               >
                 {isProcessing ? 'Processing...' : 'Process New Emails'}
-              </Button>
-              <Button
-                onClick={handleSimulateEmails}
-                disabled={isProcessing || !spreadsheetId}
-                fullWidth
-              >
-                {isProcessing ? 'Processing...' : 'Simulate 25 Emails'}
               </Button>
             </div>
 
