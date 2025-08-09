@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
 import { processEmails as runProcessEmails } from '../lib/process-emails';
 import type { EmailTask } from '../lib/process-emails';
@@ -22,8 +22,15 @@ interface UserProfile {
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID!;
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY!;
-const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets';
+// Added Drive metadata scope so we can list user spreadsheets for a picker
+const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.metadata.readonly';
 const POA_EMAIL_SENDER = 'csao.poa@dlsl.edu.ph';
+const TOKEN_STORAGE_KEY = 'poa_google_auth_v1';
+interface StoredAuth {
+  accessToken: string;
+  expiresAt: number; // epoch ms
+  user: UserProfile;
+}
 
 function App() {
   return (
@@ -40,8 +47,58 @@ const Home: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [spreadsheetId, setSpreadsheetId] = useState('');
+  const [spreadsheetInput, setSpreadsheetInput] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [useDateFilter, setUseDateFilter] = useState(true);
+  const [showSheetPicker, setShowSheetPicker] = useState(false);
+  const [isLoadingSheets, setIsLoadingSheets] = useState(false);
+  const [sheets, setSheets] = useState<{ id: string; name: string; modifiedTime?: string }[]>([]);
+  const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Load cached token/user on first mount
+  useEffect(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_STORAGE_KEY) : null;
+      if (!raw) return;
+      const stored: StoredAuth = JSON.parse(raw);
+      if (stored.expiresAt > Date.now() + 5_000) { // give 5s leeway
+        setAccessToken(stored.accessToken);
+        setUser(stored.user);
+      } else {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+      }
+    } catch (_) {
+      // ignore corrupt storage
+    }
+  }, []);
+
+  // Schedule proactive token refresh (best-effort). Without a refresh token we can only prompt user again.
+  useEffect(() => {
+    if (!accessToken) {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
+      if (!raw) return;
+      const stored: StoredAuth = JSON.parse(raw);
+      const msUntilExpiry = stored.expiresAt - Date.now();
+      // Attempt a silent-ish refresh 60s before expiry (will still show popup if needed)
+      const refreshIn = Math.max(msUntilExpiry - 60_000, 5_000);
+      refreshTimeoutRef.current = setTimeout(() => {
+        // We cannot truly refresh silently without a refresh token; notify user.
+        setStatusMessage('Session expiring soon – please click the sign in button to refresh.');
+      }, refreshIn);
+    } catch (_) {
+      // ignore
+    }
+    return () => {
+      if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+    };
+  }, [accessToken]);
 
   useEffect(() => {
     if (!accessToken) return;
@@ -58,6 +115,11 @@ const Home: React.FC = () => {
         gapi.client.setToken({ access_token: accessToken });
         await gapi.client.load('https://gmail.googleapis.com/$discovery/rest?version=v1');
         await gapi.client.load('https://sheets.googleapis.com/$discovery/rest?version=v4');
+        try {
+          await gapi.client.load('https://www.googleapis.com/discovery/v1/apis/drive/v3/rest');
+        } catch (e) {
+          // Drive might fail if prior token lacks new scope; user may need to sign in again
+        }
       });
     });
     return () => {
@@ -68,13 +130,26 @@ const Home: React.FC = () => {
   const login = useGoogleLogin({
     onSuccess: async (res: any) => {
       setAccessToken(res.access_token);
-      const p = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      const profile: UserProfile = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
         headers: { Authorization: `Bearer ${res.access_token}` },
       }).then((r) => r.json());
-      setUser(p);
+      setUser(profile);
+      // Persist token & expiry
+      const expiresInSec = res.expires_in || 3600; // default 1h if not provided
+      const stored: StoredAuth = {
+        accessToken: res.access_token,
+        user: profile,
+        expiresAt: Date.now() + expiresInSec * 1000,
+      };
+      try {
+        localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(stored));
+      } catch (_) {
+        // storage might fail (private mode etc.)
+      }
     },
     onError: () => setError('Login Failed'),
     scope: SCOPES,
+    // prompt: 'consent', // uncomment if you need to force refresh/consent
   });
 
   const handleLogout = () => {
@@ -83,6 +158,7 @@ const Home: React.FC = () => {
     setAccessToken(null);
     setTasks([]);
     setError(null);
+    try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (_) { }
   };
 
   const handleProcessEmails = useCallback(async () => {
@@ -117,6 +193,57 @@ const Home: React.FC = () => {
     }
   }, [spreadsheetId, useDateFilter]);
 
+  // Helper: parse spreadsheet ID from either raw ID or full URL
+  const extractSpreadsheetId = (val: string): string | null => {
+    if (!val) return null;
+    // If it looks like a full URL
+    const urlMatch = val.match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    if (urlMatch) return urlMatch[1];
+    // If it's just plausible ID (usually 40+ chars of allowed set)
+    if (/^[a-zA-Z0-9-_]{30,}$/.test(val)) return val;
+    return null;
+  };
+
+  const handleSpreadsheetInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value.trim();
+    setSpreadsheetInput(val);
+    const id = extractSpreadsheetId(val);
+    if (id) {
+      setSpreadsheetId(id);
+      setStatusMessage('Parsed Sheet ID successfully.');
+    } else {
+      setSpreadsheetId('');
+    }
+  };
+
+  const fetchSheets = async () => {
+    if (!gapi || !accessToken) return;
+    setIsLoadingSheets(true);
+    setError(null);
+    try {
+      const resp: any = await gapi.client.drive.files.list({
+        q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+        orderBy: 'modifiedTime desc',
+        pageSize: 50,
+        fields: 'files(id,name,modifiedTime)'
+      });
+      const items = resp.result?.files || [];
+      setSheets(items.map((f: any) => ({ id: f.id, name: f.name, modifiedTime: f.modifiedTime })));
+      setShowSheetPicker(true);
+    } catch (e: any) {
+      setError(e.result?.error?.message || 'Failed to list spreadsheets (try signing out/in to grant Drive access).');
+    } finally {
+      setIsLoadingSheets(false);
+    }
+  };
+
+  const handleSelectSheet = (id: string, name: string) => {
+    setSpreadsheetId(id);
+    setSpreadsheetInput(id);
+    setShowSheetPicker(false);
+    setStatusMessage(`Selected sheet: ${name}`);
+  };
+
   return (
     <div className="bg-gray-50 min-h-screen flex flex-col items-center justify-center p-4 font-sans">
       <Card>
@@ -138,16 +265,58 @@ const Home: React.FC = () => {
           <div className="mt-8 space-y-6">
             <div>
               <label htmlFor="spreadsheetId" className="block font-semibold text-gray-700 mb-2">
-                Target Google Sheet ID:
+                Target Google Sheet:
               </label>
-              <Input
-                type="text"
-                id="spreadsheetId"
-                value={spreadsheetId}
-                onChange={(e) => setSpreadsheetId(e.target.value)}
-                placeholder="Enter Google Sheet ID"
-              />
+              <div className="flex gap-2">
+                <Input
+                  type="text"
+                  id="spreadsheetId"
+                  value={spreadsheetInput}
+                  onChange={handleSpreadsheetInputChange}
+                  placeholder="Paste Sheet URL or ID"
+                />
+                <Button type="button" onClick={fetchSheets} disabled={isLoadingSheets}>
+                  {isLoadingSheets ? 'Loading...' : 'Browse'}
+                </Button>
+              </div>
+              {spreadsheetInput && !spreadsheetId && (
+                <p className="text-xs text-red-600 mt-1">Could not parse a valid Sheet ID.</p>
+              )}
+              {spreadsheetId && (
+                <p className="text-xs text-green-600 mt-1">Using ID: {spreadsheetId}</p>
+              )}
             </div>
+
+            {showSheetPicker && (
+              <div className="border rounded-2xl p-3 bg-white shadow-sm max-h-64 overflow-auto space-y-2">
+                <div className="flex justify-between items-center mb-1">
+                  <h4 className="font-semibold text-sm">Your Recent Spreadsheets</h4>
+                  <button
+                    className="text-xs text-gray-500 hover:text-gray-700"
+                    onClick={() => setShowSheetPicker(false)}
+                  >Close</button>
+                </div>
+                {sheets.length === 0 && !isLoadingSheets && (
+                  <p className="text-xs text-gray-500">No spreadsheets found.</p>
+                )}
+                <ul className="space-y-1">
+                  {sheets.map(s => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectSheet(s.id, s.name)}
+                        className={`w-full text-left px-2 py-1 rounded hover:bg-blue-50 text-sm ${spreadsheetId === s.id ? 'bg-blue-100' : ''}`}
+                      >
+                        <span className="font-medium">{s.name}</span>
+                        {s.modifiedTime && (
+                          <span className="ml-2 text-[10px] text-gray-500">{new Date(s.modifiedTime).toLocaleDateString()}</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             <div className="flex items-center space-x-3 mt-4 p-4 bg-gray-100 rounded-2xl">
               <input
