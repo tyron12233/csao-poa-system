@@ -11,6 +11,7 @@ import { Input } from './ui/input';
 import { Card } from './ui/card';
 import { UserProfile } from './ui/user-profile';
 import { TaskItem } from './ui/task-item';
+import { Modal } from './ui/modal';
 
 let gapi: any = undefined;
 
@@ -58,6 +59,11 @@ const Home: React.FC = () => {
   const [editingSheet, setEditingSheet] = useState(true);
   const [uploadFolderId, setUploadFolderId] = useState<string>('');
   const [uploadFolderName, setUploadFolderName] = useState<string>('');
+  const [isFolderDialogOpen, setIsFolderDialogOpen] = useState(false);
+  const [driveFolders, setDriveFolders] = useState<{ id: string; name: string; modifiedTime?: string }[]>([]);
+  const [isLoadingFolders, setIsLoadingFolders] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [folderError, setFolderError] = useState<string | null>(null);
   const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load cached token/user on first mount
@@ -301,32 +307,50 @@ const Home: React.FC = () => {
     setStatusMessage(`Selected: ${name}`);
   };
 
-  // Folder picker (Drive)
-  const selectUploadFolder = async () => {
+  const openFolderDialog = async () => {
     if (!gapi || !accessToken) return;
-    setStatusMessage('Loading folders...');
+    setIsFolderDialogOpen(true);
+    setFolderError(null);
+    setIsLoadingFolders(true);
     try {
       const resp: any = await gapi.client.drive.files.list({
         q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
         orderBy: 'modifiedTime desc',
-        pageSize: 50,
-        fields: 'files(id,name)'
+        pageSize: 100,
+        fields: 'files(id,name,modifiedTime)'
       });
-      const folders = resp.result?.files || [];
-      if (folders.length === 0) {
-        setError('No folders found in Drive. Create one and retry.');
-        return;
-      }
-      const choice = prompt('Enter the number of the folder to use:\n' + folders.map((f: any, idx: number) => `${idx + 1}. ${f.name}`).join('\n'));
-      const idx = choice ? parseInt(choice, 10) - 1 : -1;
-      if (idx >= 0 && idx < folders.length) {
-        setUploadFolderId(folders[idx].id);
-        setUploadFolderName(folders[idx].name);
-        setStatusMessage(`Selected upload folder: ${folders[idx].name}`);
-      }
+      setDriveFolders(resp.result?.files || []);
     } catch (e: any) {
-      setError(e.result?.error?.message || 'Failed to load folders.');
+      setFolderError(e.result?.error?.message || 'Failed to load folders.');
+    } finally {
+      setIsLoadingFolders(false);
     }
+  };
+
+  const handleCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFolderName.trim()) return;
+    try {
+      setFolderError(null);
+      const resp: any = await gapi.client.drive.files.create({
+        resource: { name: newFolderName.trim(), mimeType: 'application/vnd.google-apps.folder' },
+        fields: 'id,name'
+      });
+      const folder = resp.result;
+      setDriveFolders(prev => [folder, ...prev]);
+      setUploadFolderId(folder.id);
+      setUploadFolderName(folder.name);
+      setNewFolderName('');
+    } catch (e: any) {
+      setFolderError(e.result?.error?.message || 'Failed to create folder.');
+    }
+  };
+
+  const selectFolder = (id: string, name: string) => {
+    setUploadFolderId(id);
+    setUploadFolderName(name);
+    setIsFolderDialogOpen(false);
+    setStatusMessage(`Selected upload folder: ${name}`);
   };
 
   return (
@@ -448,7 +472,7 @@ const Home: React.FC = () => {
                     <p className="text-xs text-gray-500">No folder selected. PDFs will be skipped.</p>
                   )}
                 </div>
-                <Button type="button" onClick={selectUploadFolder} disabled={!accessToken}>Select</Button>
+                <Button type="button" onClick={openFolderDialog} disabled={!accessToken}>Select</Button>
               </div>
             </div>
 
@@ -507,6 +531,42 @@ const Home: React.FC = () => {
           </div>
         )}
       </Card>
+      <Modal open={isFolderDialogOpen} onClose={() => setIsFolderDialogOpen(false)} title="Select Upload Folder" maxWidthClass="max-w-2xl">
+        <div className="space-y-6">
+          <form onSubmit={handleCreateFolder} className="flex gap-2 items-end flex-wrap">
+            <div className="flex-1 min-w-[220px]">
+              <label className="block text-xs font-medium text-gray-600 mb-1">New Folder Name</label>
+              <Input value={newFolderName} onChange={e => setNewFolderName(e.target.value)} placeholder="e.g., POA PDFs" />
+            </div>
+            <Button type="submit" disabled={!newFolderName.trim()}>Create</Button>
+          </form>
+          {folderError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{folderError}</p>}
+          <div>
+            <p className="text-xs font-medium text-gray-600 mb-2">Existing Folders</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-auto pr-1">
+              {isLoadingFolders && <p className="text-sm text-gray-500">Loading folders...</p>}
+              {!isLoadingFolders && driveFolders.length === 0 && (
+                <p className="text-sm text-gray-500">No folders found.</p>
+              )}
+              {driveFolders.map(f => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => selectFolder(f.id, f.name)}
+                  className={`group border rounded-xl px-3 py-2 text-left hover:border-blue-400 hover:bg-blue-50 transition-colors ${uploadFolderId === f.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white'}`}
+                >
+                  <p className="font-medium text-sm text-gray-800 truncate" title={f.name}>{f.name}</p>
+                  {f.modifiedTime && <p className="text-[10px] text-gray-500 mt-1">Updated {new Date(f.modifiedTime).toLocaleDateString()}</p>}
+                  {uploadFolderId === f.id && <p className="text-[10px] text-blue-600 mt-1 font-semibold">Selected</p>}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <Button type="button" onClick={() => setIsFolderDialogOpen(false)}>Close</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 };
