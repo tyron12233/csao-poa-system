@@ -434,16 +434,30 @@ const Home: React.FC = () => {
               </p>
             )}
 
-            {tasks.length > 0 && (
-              <div className="mt-8">
-                <h3 className="text-lg font-semibold text-gray-800 mb-4">Tasks</h3>
-                <ul className="space-y-3">
-                  {tasks.map((task: EmailTask) => (
-                    <TaskItem key={task.id} task={task} />
-                  ))}
-                </ul>
-              </div>
-            )}
+            {tasks.length > 0 && (() => {
+              const counts = tasks.reduce<Record<string, number>>((acc, t) => {
+                acc[t.status] = (acc[t.status] || 0) + 1; return acc;
+              }, {});
+              const order = ['queued', 'fetching', 'parsing', 'building_request', 'writing', 'done', 'error'];
+              return (
+                <div className="mt-8 space-y-4">
+                  <div className="flex flex-wrap gap-3 items-center">
+                    <h3 className="text-lg font-semibold text-gray-800 mr-2">Tasks</h3>
+                    {order.filter(k => counts[k]).map(k => (
+                      <span key={k} className="text-[11px] uppercase tracking-wide bg-gray-200 text-gray-700 px-2 py-1 rounded-full font-medium">
+                        {k.replace('_', ' ')}: {counts[k]}
+                      </span>
+                    ))}
+                    <span className="text-[11px] text-gray-500 ml-auto">Total: {tasks.length}</span>
+                  </div>
+                  <ul className="flex flex-wrap gap-2">
+                    {tasks.map((task: EmailTask) => (
+                      <TaskItem key={task.id} task={task} compact />
+                    ))}
+                  </ul>
+                </div>
+              );
+            })()}
           </div>
         )}
       </Card>
