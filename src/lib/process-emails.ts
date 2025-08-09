@@ -305,7 +305,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
     const allMessages: any[] = [];
     let pageToken: string | undefined = undefined;
     do {
-    const listRes: any = await gapi.client.gmail.users.messages.list({ userId: 'me', q: gmailQuery, maxResults: 500, pageToken });
+        const listRes: any = await gapi.client.gmail.users.messages.list({ userId: 'me', q: gmailQuery, maxResults: 500, pageToken });
         const pageMessages = (listRes.result.messages || []).filter((msg: any) => !processedIds.has(msg.id!));
         allMessages.push(...pageMessages);
         callbacks.status(`Fetched ${allMessages.length} candidate emails...`);
@@ -445,7 +445,7 @@ export async function processFakeEmails(gapi: any, params: Omit<ProcessEmailsPar
         const dataBySheet = new Map<string, any[][]>();
         monthSheetNames.forEach(name => dataBySheet.set(name, []));
         batchIds.forEach(id => {
-            const rowData = ['UNSET', 'Sim Org', `Sim Activity ${id}`, 'Synthetic description', now.toISOString().slice(0,10), next.toISOString().slice(0,10), '08:00-10:00', 'Campus', 'Type', '', ''];
+            const rowData = ['UNSET', 'Sim Org', `Sim Activity ${id}`, 'Synthetic description', now.toISOString().slice(0, 10), next.toISOString().slice(0, 10), '08:00-10:00', 'Campus', 'Type', '', ''];
             monthSheetNames.forEach(name => dataBySheet.get(name)!.push(rowData));
         });
 
