@@ -13,7 +13,7 @@ interface ActivityDetails {
 
 // --- Types ---
 export interface UserProfile { email: string; name: string; picture: string; }
-export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'building_request' | 'writing' | 'done' | 'skipped' | 'error';
+export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'uploading_pdf' | 'building_request' | 'writing' | 'done' | 'skipped' | 'error';
 export interface EmailTask { id: string; subject: string; status: EmailTaskStatus; error?: string; }
 export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, monthSheetNames: string[], rowData: any[] } };
 export type ParsedResult = ParsedSuccessResult | { status: 'error', messageId: string, error: string };
@@ -224,7 +224,7 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 };
 
 // --- Email parsing ---
-async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks): Promise<ParsedResult> {
+async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks, uploadFolderId?: string): Promise<ParsedResult> {
     try {
         callbacks.updateTask(messageId, { status: 'fetching' });
         const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
@@ -240,7 +240,17 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         if (!startDate || !endDate) throw new Error(`Invalid dates for: ${parsedData.title}`);
 
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
-        const rowData = ['UNSET', parsedData.organization, parsedData.title, parsedData.description, parsedData.startDate, parsedData.endDate, parsedData.time, parsedData.venue, parsedData.type, '', ''];
+        // Generate & upload PDF (optional)
+        let pdfLink = '';
+        if (uploadFolderId) {
+            try {
+                callbacks.updateTask(messageId, { status: 'uploading_pdf' });
+                pdfLink = await generateAndUploadPdf(gapi, htmlBody, subject, uploadFolderId);
+            } catch (e: any) {
+                console.warn('PDF upload failed', e);
+            }
+        }
+        const rowData = ['UNSET', parsedData.organization, parsedData.title, parsedData.description, parsedData.startDate, parsedData.endDate, parsedData.time, parsedData.venue, parsedData.type, pdfLink, ''];
 
         return { status: 'success', data: { messageId, subject, parsedData, monthSheetNames, rowData } };
     } catch (err: any) {
@@ -248,6 +258,58 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         callbacks.updateTask(messageId, { status: 'error', error: errorMessage });
         return { status: 'error', messageId, error: errorMessage };
     }
+}
+
+// PDF generation & Drive upload
+async function generateAndUploadPdf(gapi: any, htmlBody: string, subject: string, folderId: string): Promise<string> {
+    const { jsPDF } = await import('jspdf');
+    await import('html2canvas');
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const container = document.createElement('div');
+    container.style.position = 'fixed';
+    container.style.left = '-20000px';
+    container.style.top = '0';
+    container.style.width = '800px';
+    container.innerHTML = htmlBody;
+    document.body.appendChild(container);
+    await new Promise<void>((resolve) => {
+        // @ts-ignore html plugin available via import
+        doc.html(container, { callback: () => resolve(), autoPaging: 'text', width: 550, windowWidth: 800 });
+    });
+    document.body.removeChild(container);
+    const blob = doc.output('blob') as Blob;
+    const fileName = (subject || 'POA Email').substring(0, 80).replace(/[^a-zA-Z0-9 _.-]/g, '_') + '.pdf';
+
+    const metadata = { name: fileName, mimeType: 'application/pdf', parents: [folderId] };
+    const boundary = '-------314159265358979323846';
+    const delimiter = '\r\n--' + boundary + '\r\n';
+    const closeDelim = '\r\n--' + boundary + '--';
+    const base64Data = await blobToBase64(blob);
+    const multipartRequestBody =
+        delimiter + 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) +
+        delimiter + 'Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n' + base64Data + closeDelim;
+
+    const resp: any = await gapi.client.request({
+        path: '/upload/drive/v3/files',
+        method: 'POST',
+        params: { uploadType: 'multipart', fields: 'id,webViewLink' },
+        headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+        body: multipartRequestBody,
+    });
+    return resp.result.webViewLink || '';
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const dataUrl = reader.result as string;
+            const base64 = dataUrl.split(',')[1];
+            resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
 }
 
 // --- Callback contracts ---
@@ -262,11 +324,12 @@ export type ProcessEmailsParams = {
     spreadsheetId: string;
     senderEmail: string;
     useDateFilter: boolean;
+    uploadFolderId?: string; // target Drive folder for PDFs
     callbacks: Callbacks;
 };
 
 export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
-    const { spreadsheetId, senderEmail, useDateFilter, callbacks } = params;
+    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, callbacks } = params;
 
     // --- Phase 1: Fetch emails ---
     let gmailQuery = `from:${senderEmail} "POA" "The request is now complete."`;
@@ -337,7 +400,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         const parsedResults: ParsedResult[] = [];
         for (let i = 0; i < batchMessages.length; i += 5) {
             const chunk = batchMessages.slice(i, i + 5);
-            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks))));
+            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks, uploadFolderId))));
         }
         const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
         const successfulIds = successfulResults.map(p => p.data.messageId);

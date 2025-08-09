@@ -56,6 +56,8 @@ const Home: React.FC = () => {
   const [sheetTitle, setSheetTitle] = useState<string>('');
   const [sheetTitleLoading, setSheetTitleLoading] = useState(false);
   const [editingSheet, setEditingSheet] = useState(true);
+  const [uploadFolderId, setUploadFolderId] = useState<string>('');
+  const [uploadFolderName, setUploadFolderName] = useState<string>('');
   const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load cached token/user on first mount
@@ -178,6 +180,7 @@ const Home: React.FC = () => {
         spreadsheetId,
         senderEmail: POA_EMAIL_SENDER,
         useDateFilter,
+        uploadFolderId: uploadFolderId || undefined,
         callbacks: {
           status: (msg: string) => setStatusMessage(msg),
           queue: (newTasks: EmailTask[]) => setTasks(newTasks),
@@ -209,6 +212,7 @@ const Home: React.FC = () => {
       await processFakeEmails(gapi, {
         spreadsheetId,
         count: 25, // simulate 25 emails (processed in batches of 10)
+        uploadFolderId: uploadFolderId || undefined,
         callbacks: {
           status: (msg: string) => setStatusMessage(msg),
           queue: (newTasks: EmailTask[]) => setTasks(newTasks),
@@ -295,6 +299,34 @@ const Home: React.FC = () => {
     setSheetTitle(name);
     setEditingSheet(false);
     setStatusMessage(`Selected: ${name}`);
+  };
+
+  // Folder picker (Drive)
+  const selectUploadFolder = async () => {
+    if (!gapi || !accessToken) return;
+    setStatusMessage('Loading folders...');
+    try {
+      const resp: any = await gapi.client.drive.files.list({
+        q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
+        orderBy: 'modifiedTime desc',
+        pageSize: 50,
+        fields: 'files(id,name)'
+      });
+      const folders = resp.result?.files || [];
+      if (folders.length === 0) {
+        setError('No folders found in Drive. Create one and retry.');
+        return;
+      }
+      const choice = prompt('Enter the number of the folder to use:\n' + folders.map((f: any, idx: number) => `${idx + 1}. ${f.name}`).join('\n'));
+      const idx = choice ? parseInt(choice, 10) - 1 : -1;
+      if (idx >= 0 && idx < folders.length) {
+        setUploadFolderId(folders[idx].id);
+        setUploadFolderName(folders[idx].name);
+        setStatusMessage(`Selected upload folder: ${folders[idx].name}`);
+      }
+    } catch (e: any) {
+      setError(e.result?.error?.message || 'Failed to load folders.');
+    }
   };
 
   return (
@@ -404,6 +436,20 @@ const Home: React.FC = () => {
                   (Only fetch newer emails)
                 </span>
               </label>
+            </div>
+
+            <div className="bg-gray-100 rounded-2xl p-4 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-700">Upload PDF Folder (optional)</p>
+                  {uploadFolderId ? (
+                    <p className="text-xs text-green-700 truncate">{uploadFolderName} (set)</p>
+                  ) : (
+                    <p className="text-xs text-gray-500">No folder selected. PDFs will be skipped.</p>
+                  )}
+                </div>
+                <Button type="button" onClick={selectUploadFolder} disabled={!accessToken}>Select</Button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

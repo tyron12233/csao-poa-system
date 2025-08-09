@@ -10,6 +10,7 @@ export const StatusPill: React.FC<StatusPillProps> = ({ status }) => {
         error: 'bg-red-100 text-red-800',
         fetching: 'bg-blue-100 text-blue-800 animate-pulse',
         parsing: 'bg-yellow-100 text-yellow-800 animate-pulse',
+        uploading_pdf: 'bg-orange-100 text-orange-800 animate-pulse',
         building_request: 'bg-indigo-100 text-indigo-800',
         writing: 'bg-purple-100 text-purple-800 animate-pulse',
         queued: 'bg-gray-200 text-gray-800',
