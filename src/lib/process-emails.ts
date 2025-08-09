@@ -300,99 +300,210 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         }
     }
 
-    const listRes = await gapi.client.gmail.users.messages.list({ userId: 'me', q: gmailQuery });
-    const newMessages = (listRes.result.messages || []).filter((msg: any) => !processedIds.has(msg.id!));
-    if (newMessages.length === 0) {
+    // --- Pagination: fetch all messages (up to a max) ---
+    const MAX_MESSAGES = 1000;
+    const allMessages: any[] = [];
+    let pageToken: string | undefined = undefined;
+    do {
+    const listRes: any = await gapi.client.gmail.users.messages.list({ userId: 'me', q: gmailQuery, maxResults: 500, pageToken });
+        const pageMessages = (listRes.result.messages || []).filter((msg: any) => !processedIds.has(msg.id!));
+        allMessages.push(...pageMessages);
+        callbacks.status(`Fetched ${allMessages.length} candidate emails...`);
+        pageToken = listRes.result.nextPageToken;
+        if (allMessages.length >= MAX_MESSAGES) {
+            callbacks.status(`Reached max limit of ${MAX_MESSAGES} emails; stopping pagination.`);
+            break;
+        }
+    } while (pageToken);
+
+    if (allMessages.length === 0) {
         callbacks.status('No new emails to process.');
         return { processed: 0 };
     }
 
-    // --- Phase 2: Parse emails ---
-    callbacks.queue(newMessages.map((msg: any) => ({ id: msg.id!, subject: 'In queue...', status: 'queued' })));
-    const parsedResults: ParsedResult[] = [];
-    for (let i = 0; i < newMessages.length; i += 5) {
-        const chunk = newMessages.slice(i, i + 5);
-        parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks))));
-    }
-    const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
-    const successfulIds = successfulResults.map(p => p.data.messageId);
-    callbacks.updateTasksBulk(successfulIds, { status: 'building_request' });
+    // Queue all tasks initially
+    callbacks.queue(allMessages.map((msg: any) => ({ id: msg.id!, subject: 'In queue...', status: 'queued' })));
 
-    // --- Phase 3: Pre-compute sheet state ---
-    callbacks.status('Pre-computing sheet states...');
-    const dataBySheet = new Map<string, any[][]>();
-    const neededSheetNames = new Set<string>([LOG_SHEET_NAME]);
-    for (const result of successfulResults) {
-        for (const sheetName of result.data.monthSheetNames) {
-            if (!dataBySheet.has(sheetName)) dataBySheet.set(sheetName, []);
-            dataBySheet.get(sheetName)!.push(result.data.rowData);
-            neededSheetNames.add(sheetName);
+    let totalProcessed = 0;
+    const BATCH_SIZE = 10;
+    const totalBatches = Math.ceil(allMessages.length / BATCH_SIZE);
+
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+        const start = batchIndex * BATCH_SIZE;
+        const batchMessages = allMessages.slice(start, start + BATCH_SIZE);
+        callbacks.status(`Processing batch ${batchIndex + 1} of ${totalBatches} (${batchMessages.length} emails)...`);
+
+        // Parse (internal small concurrency: chunks of 5)
+        const parsedResults: ParsedResult[] = [];
+        for (let i = 0; i < batchMessages.length; i += 5) {
+            const chunk = batchMessages.slice(i, i + 5);
+            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks))));
         }
-    }
+        const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
+        const successfulIds = successfulResults.map(p => p.data.messageId);
+        callbacks.updateTasksBulk(successfulIds, { status: 'building_request' });
 
-    const initialSheetProps = await gapi.client.sheets.spreadsheets.get({ spreadsheetId });
-    const existingSheets = new Map<string, any>(initialSheetProps.result.sheets?.map((s: any) => [s.properties.title, { sheetId: s.properties.sheetId }]));
-    const sheetsToCreate = [...neededSheetNames].filter(name => !existingSheets.has(name));
-
-    if (sheetsToCreate.length > 0) {
-        callbacks.status(`Creating ${sheetsToCreate.length} new sheets...`);
-        const createRequests = sheetsToCreate.map(title => ({ addSheet: { properties: { title } } }));
-        const createResult = await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: createRequests } });
-
-        const headerRequests: any[] = [];
-        createResult.result.replies?.forEach((reply: any) => {
-            const props = reply.addSheet.properties;
-            existingSheets.set(props.title, { sheetId: props.sheetId });
-            const headers = props.title === LOG_SHEET_NAME ? LOG_HEADERS : MONTHLY_HEADERS;
-            headerRequests.push(...generateHeaderRequests(props.sheetId, headers));
-        });
-
-        if (headerRequests.length > 0) {
-            callbacks.status('Applying headers and styles to new sheets...');
-            await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: headerRequests } });
-        }
-    }
-
-    const sheetState = new Map<string, { sheetId: number, lastRow: number }>();
-    const valueRangesToGet = [...neededSheetNames].filter(name => existingSheets.has(name)).map(name => `${name}!A:A`);
-    if (valueRangesToGet.length > 0) {
-        const sheetValues = await gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: valueRangesToGet });
-        sheetValues.result.valueRanges?.forEach((rangeResult: any) => {
-            const sheetName = rangeResult.range.split('!')[0].replace(/'/g, '');
-            const lastRow = rangeResult.values?.length || 0;
-            if (existingSheets.has(sheetName)) {
-                sheetState.set(sheetName, { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow });
+        // Pre-compute sheet state for this batch
+        const dataBySheet = new Map<string, any[][]>();
+        const neededSheetNames = new Set<string>([LOG_SHEET_NAME]);
+        for (const result of successfulResults) {
+            for (const sheetName of result.data.monthSheetNames) {
+                if (!dataBySheet.has(sheetName)) dataBySheet.set(sheetName, []);
+                dataBySheet.get(sheetName)!.push(result.data.rowData);
+                neededSheetNames.add(sheetName);
             }
-        });
-    }
-
-    // --- Phase 4: Build master batch request ---
-    const masterRequest: any[] = [];
-    for (const [sheetName, rows] of dataBySheet.entries()) {
-        const state = sheetState.get(sheetName);
-        if (!state) continue;
-        masterRequest.push({ appendDimension: { sheetId: state.sheetId, dimension: 'ROWS', length: rows.length } });
-        for (let i = 0; i < rows.length; i++) {
-            masterRequest.push(...generateRowRequests(state.sheetId, state.lastRow + i, rows[i]));
         }
+
+        // Ensure sheets exist (fetch fresh each batch to include prior creations)
+        const initialSheetProps = await gapi.client.sheets.spreadsheets.get({ spreadsheetId });
+        const existingSheets = new Map<string, any>(initialSheetProps.result.sheets?.map((s: any) => [s.properties.title, { sheetId: s.properties.sheetId }]));
+        const sheetsToCreate = [...neededSheetNames].filter(name => !existingSheets.has(name));
+
+        if (sheetsToCreate.length > 0) {
+            callbacks.status(`Creating ${sheetsToCreate.length} new sheets (batch ${batchIndex + 1})...`);
+            const createRequests = sheetsToCreate.map(title => ({ addSheet: { properties: { title } } }));
+            const createResult = await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: createRequests } });
+
+            const headerRequests: any[] = [];
+            createResult.result.replies?.forEach((reply: any) => {
+                const props = reply.addSheet.properties;
+                existingSheets.set(props.title, { sheetId: props.sheetId });
+                const headers = props.title === LOG_SHEET_NAME ? LOG_HEADERS : MONTHLY_HEADERS;
+                headerRequests.push(...generateHeaderRequests(props.sheetId, headers));
+            });
+
+            if (headerRequests.length > 0) {
+                callbacks.status('Applying headers and styles to new sheets...');
+                await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: headerRequests } });
+            }
+        }
+
+        const sheetState = new Map<string, { sheetId: number, lastRow: number }>();
+        const valueRangesToGet = [...neededSheetNames].filter(name => existingSheets.has(name)).map(name => `${name}!A:A`);
+        if (valueRangesToGet.length > 0) {
+            const sheetValues = await gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: valueRangesToGet });
+            sheetValues.result.valueRanges?.forEach((rangeResult: any) => {
+                const sheetName = rangeResult.range.split('!')[0].replace(/'/g, '');
+                const lastRow = rangeResult.values?.length || 0;
+                if (existingSheets.has(sheetName)) {
+                    sheetState.set(sheetName, { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow });
+                }
+            });
+        }
+
+        const masterRequest: any[] = [];
+        for (const [sheetName, rows] of dataBySheet.entries()) {
+            const state = sheetState.get(sheetName);
+            if (!state) continue;
+            masterRequest.push({ appendDimension: { sheetId: state.sheetId, dimension: 'ROWS', length: rows.length } });
+            for (let i = 0; i < rows.length; i++) {
+                masterRequest.push(...generateRowRequests(state.sheetId, state.lastRow + i, rows[i]));
+            }
+        }
+
+        if (masterRequest.length > 0) {
+            callbacks.status(`Writing batch ${batchIndex + 1} of ${totalBatches} to sheet...`);
+            callbacks.updateTasksBulk(successfulIds, { status: 'writing' });
+            await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: masterRequest } });
+        }
+
+        const logRows = successfulResults.map(res => [new Date().toISOString(), res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]);
+        if (logRows.length > 0) {
+            await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: LOG_SHEET_NAME, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
+        }
+        callbacks.updateTasksBulk(successfulIds, { status: 'done' });
+        totalProcessed += successfulResults.length;
+        callbacks.status(`Batch ${batchIndex + 1} complete. Processed ${successfulResults.length} emails (Total so far: ${totalProcessed}).`);
     }
 
-    // --- Phase 5: Execute ---
-    if (masterRequest.length > 0) {
-        callbacks.status('Executing a single batch update...');
-        callbacks.updateTasksBulk(successfulIds, { status: 'writing' });
-        await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: masterRequest } });
-    }
+    callbacks.status(`Process complete. ${totalProcessed} new emails were successfully processed in ${Math.ceil(allMessages.length / BATCH_SIZE)} batch(es).`);
+    return { processed: totalProcessed };
+}
 
-    // --- Phase 6: Log & finalize ---
-    const logRows = successfulResults.map(res => [new Date().toISOString(), res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]);
-    if (logRows.length > 0) {
+// --- Simulation (no Gmail dependency) ---
+export async function processFakeEmails(gapi: any, params: Omit<ProcessEmailsParams, 'senderEmail' | 'useDateFilter'> & { count: number }): Promise<{ processed: number }> {
+    const { spreadsheetId, callbacks, count } = params;
+    const BATCH_SIZE = 10;
+    const totalBatches = Math.ceil(count / BATCH_SIZE);
+
+    // Create fake queued tasks
+    const fakeIds = Array.from({ length: count }, (_, i) => `FAKE-${Date.now()}-${i}`);
+    callbacks.queue(fakeIds.map(id => ({ id, subject: 'Simulated Email', status: 'queued' })));
+
+    let processed = 0;
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+        const start = batchIndex * BATCH_SIZE;
+        const batchIds = fakeIds.slice(start, start + BATCH_SIZE);
+        callbacks.status(`Simulating batch ${batchIndex + 1} of ${totalBatches} (${batchIds.length} emails)...`);
+        callbacks.updateTasksBulk(batchIds, { status: 'parsing' });
+
+        // Build synthetic results (spread randomly across current and next month)
+        const now = new Date();
+        const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        const monthSheetNames = [formatMonthYear(now), formatMonthYear(next)];
+
+        const dataBySheet = new Map<string, any[][]>();
+        monthSheetNames.forEach(name => dataBySheet.set(name, []));
+        batchIds.forEach(id => {
+            const rowData = ['UNSET', 'Sim Org', `Sim Activity ${id}`, 'Synthetic description', now.toISOString().slice(0,10), next.toISOString().slice(0,10), '08:00-10:00', 'Campus', 'Type', '', ''];
+            monthSheetNames.forEach(name => dataBySheet.get(name)!.push(rowData));
+        });
+
+        const neededSheetNames = new Set<string>([LOG_SHEET_NAME, ...monthSheetNames]);
+        const initialSheetProps = await gapi.client.sheets.spreadsheets.get({ spreadsheetId });
+        const existingSheets = new Map<string, any>(initialSheetProps.result.sheets?.map((s: any) => [s.properties.title, { sheetId: s.properties.sheetId }]));
+        const sheetsToCreate = [...neededSheetNames].filter(name => !existingSheets.has(name));
+        if (sheetsToCreate.length > 0) {
+            callbacks.status('Creating sheets for simulation...');
+            const createRequests = sheetsToCreate.map(title => ({ addSheet: { properties: { title } } }));
+            const createResult = await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: createRequests } });
+            const headerRequests: any[] = [];
+            createResult.result.replies?.forEach((reply: any) => {
+                const props = reply.addSheet.properties;
+                existingSheets.set(props.title, { sheetId: props.sheetId });
+                const headers = props.title === LOG_SHEET_NAME ? LOG_HEADERS : MONTHLY_HEADERS;
+                headerRequests.push(...generateHeaderRequests(props.sheetId, headers));
+            });
+            if (headerRequests.length > 0) {
+                await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: headerRequests } });
+            }
+        }
+
+        const sheetState = new Map<string, { sheetId: number, lastRow: number }>();
+        const valueRangesToGet = [...neededSheetNames].filter(name => existingSheets.has(name)).map(name => `${name}!A:A`);
+        if (valueRangesToGet.length > 0) {
+            const sheetValues = await gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: valueRangesToGet });
+            sheetValues.result.valueRanges?.forEach((rangeResult: any) => {
+                const sheetName = rangeResult.range.split('!')[0].replace(/'/g, '');
+                const lastRow = rangeResult.values?.length || 0;
+                if (existingSheets.has(sheetName)) {
+                    sheetState.set(sheetName, { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow });
+                }
+            });
+        }
+
+        const masterRequest: any[] = [];
+        for (const [sheetName, rows] of dataBySheet.entries()) {
+            const state = sheetState.get(sheetName);
+            if (!state) continue;
+            masterRequest.push({ appendDimension: { sheetId: state.sheetId, dimension: 'ROWS', length: rows.length } });
+            for (let i = 0; i < rows.length; i++) {
+                masterRequest.push(...generateRowRequests(state.sheetId, state.lastRow + i, rows[i]));
+            }
+        }
+        if (masterRequest.length > 0) {
+            callbacks.status('Writing simulated rows...');
+            callbacks.updateTasksBulk(batchIds, { status: 'writing' });
+            await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: masterRequest } });
+        }
+        const logRows = batchIds.map(id => [new Date().toISOString(), id, 'Simulated', 'Sim Org', `Sim Activity ${id}`]);
         await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: LOG_SHEET_NAME, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
+        callbacks.updateTasksBulk(batchIds, { status: 'done' });
+        processed += batchIds.length;
+        callbacks.status(`Simulation batch ${batchIndex + 1} complete. Total simulated: ${processed}`);
     }
-    callbacks.updateTasksBulk(successfulIds, { status: 'done' });
-    callbacks.status(`Process complete. ${successfulResults.length} new emails were successfully processed.`);
-
-    return { processed: successfulResults.length };
+    callbacks.status(`Simulation complete. ${processed} fake emails processed.`);
+    return { processed };
 }
 
 export const SheetsConfig = { LOG_SHEET_NAME, LOG_HEADERS, MONTHLY_HEADERS };

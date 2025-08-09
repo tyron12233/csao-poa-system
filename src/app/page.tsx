@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
-import { processEmails as runProcessEmails } from '../lib/process-emails';
+import { processEmails as runProcessEmails, processFakeEmails } from '../lib/process-emails';
 import type { EmailTask } from '../lib/process-emails';
 
 // Import reusable UI components
@@ -196,6 +196,35 @@ const Home: React.FC = () => {
     }
   }, [spreadsheetId, useDateFilter]);
 
+  const handleSimulateEmails = useCallback(async () => {
+    if (!spreadsheetId) {
+      setError('Please select a Google Sheet first.');
+      return;
+    }
+    setError(null);
+    setStatusMessage('Starting simulation...');
+    setIsProcessing(true);
+    setTasks([]);
+    try {
+      await processFakeEmails(gapi, {
+        spreadsheetId,
+        count: 25, // simulate 25 emails (processed in batches of 10)
+        callbacks: {
+          status: (msg: string) => setStatusMessage(msg),
+          queue: (newTasks: EmailTask[]) => setTasks(newTasks),
+          updateTask: (id: string, patch: Partial<EmailTask>) =>
+            setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t))),
+          updateTasksBulk: (ids: string[], patch: Partial<EmailTask>) =>
+            setTasks((prev) => prev.map((t) => (ids.includes(t.id) ? { ...t, ...patch } : t))),
+        },
+      });
+    } catch (err: any) {
+      setError(err.result?.error?.message || err.message || 'Simulation error.');
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [spreadsheetId]);
+
   // Helper: parse spreadsheet ID from either raw ID or full URL
   const extractSpreadsheetId = (val: string): string | null => {
     if (!val) return null;
@@ -377,13 +406,22 @@ const Home: React.FC = () => {
               </label>
             </div>
 
-            <Button
-              onClick={handleProcessEmails}
-              disabled={isProcessing || !spreadsheetId}
-              fullWidth
-            >
-              {isProcessing ? 'Processing...' : 'Process New Emails'}
-            </Button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Button
+                onClick={handleProcessEmails}
+                disabled={isProcessing || !spreadsheetId}
+                fullWidth
+              >
+                {isProcessing ? 'Processing...' : 'Process New Emails'}
+              </Button>
+              <Button
+                onClick={handleSimulateEmails}
+                disabled={isProcessing || !spreadsheetId}
+                fullWidth
+              >
+                {isProcessing ? 'Processing...' : 'Simulate 25 Emails'}
+              </Button>
+            </div>
 
             {error && (
               <p className="text-red-600 text-center bg-red-100 p-3 rounded-2xl mt-4">
