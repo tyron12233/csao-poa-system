@@ -53,6 +53,9 @@ const Home: React.FC = () => {
   const [showSheetPicker, setShowSheetPicker] = useState(false);
   const [isLoadingSheets, setIsLoadingSheets] = useState(false);
   const [sheets, setSheets] = useState<{ id: string; name: string; modifiedTime?: string }[]>([]);
+  const [sheetTitle, setSheetTitle] = useState<string>('');
+  const [sheetTitleLoading, setSheetTitleLoading] = useState(false);
+  const [editingSheet, setEditingSheet] = useState(true);
   const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load cached token/user on first mount
@@ -210,9 +213,28 @@ const Home: React.FC = () => {
     const id = extractSpreadsheetId(val);
     if (id) {
       setSpreadsheetId(id);
-      setStatusMessage('Parsed Sheet ID successfully.');
+      setStatusMessage('Found sheet – retrieving details...');
+      fetchSheetTitle(id);
     } else {
       setSpreadsheetId('');
+      setSheetTitle('');
+    }
+  };
+
+  const fetchSheetTitle = async (id: string) => {
+    if (!gapi || !accessToken || !id) return;
+    setSheetTitleLoading(true);
+    try {
+      const resp: any = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: id, fields: 'properties.title' });
+      const title = resp.result?.properties?.title || '';
+      setSheetTitle(title);
+      setEditingSheet(false);
+      setStatusMessage('Ready to process.');
+    } catch (e: any) {
+      setSheetTitle('');
+      setStatusMessage('Could not fetch sheet title – ensure you have access.');
+    } finally {
+      setSheetTitleLoading(false);
     }
   };
 
@@ -239,9 +261,11 @@ const Home: React.FC = () => {
 
   const handleSelectSheet = (id: string, name: string) => {
     setSpreadsheetId(id);
-    setSpreadsheetInput(id);
+    setSpreadsheetInput(name);
     setShowSheetPicker(false);
-    setStatusMessage(`Selected sheet: ${name}`);
+    setSheetTitle(name);
+    setEditingSheet(false);
+    setStatusMessage(`Selected: ${name}`);
   };
 
   return (
@@ -264,35 +288,52 @@ const Home: React.FC = () => {
         ) : (
           <div className="mt-8 space-y-6">
             <div>
-              <label htmlFor="spreadsheetId" className="block font-semibold text-gray-700 mb-2">
-                Target Google Sheet:
+              <label htmlFor="spreadsheetId" className="block font-semibold text-gray-800 mb-2">
+                Target Google Sheet
               </label>
-              <div className="flex gap-2">
-                <Input
-                  type="text"
-                  id="spreadsheetId"
-                  value={spreadsheetInput}
-                  onChange={handleSpreadsheetInputChange}
-                  placeholder="Paste Sheet URL or ID"
-                />
-                <Button type="button" onClick={fetchSheets} disabled={isLoadingSheets}>
-                  {isLoadingSheets ? 'Loading...' : 'Browse'}
-                </Button>
-              </div>
-              {spreadsheetInput && !spreadsheetId && (
-                <p className="text-xs text-red-600 mt-1">Could not parse a valid Sheet ID.</p>
-              )}
-              {spreadsheetId && (
-                <p className="text-xs text-green-600 mt-1">Using ID: {spreadsheetId}</p>
+              {editingSheet ? (
+                <>
+                  <div className="flex gap-2">
+                    <Input
+                      type="text"
+                      id="spreadsheetId"
+                      value={spreadsheetInput}
+                      onChange={handleSpreadsheetInputChange}
+                      placeholder="Paste Google Sheet URL (or use Browse)"
+                      aria-describedby="sheet-helper"
+                    />
+                    <Button type="button" onClick={fetchSheets} disabled={isLoadingSheets}>
+                      {isLoadingSheets ? 'Loading...' : 'Browse'}
+                    </Button>
+                  </div>
+                  <div id="sheet-helper" className="mt-1 space-y-1">
+                    {spreadsheetInput && !spreadsheetId && (
+                      <p className="text-xs text-amber-700 bg-amber-100/70 rounded px-2 py-1">Paste a valid Google Sheet link (https://docs.google.com/spreadsheets/d/...).</p>
+                    )}
+                    {sheetTitleLoading && (
+                      <p className="text-xs text-blue-700 bg-blue-100/70 rounded px-2 py-1">Fetching sheet details...</p>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-between gap-4 bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
+                  <div className="min-w-0">
+                    <p className="text-sm text-gray-500 leading-tight">Selected Sheet</p>
+                    <p className="font-medium text-gray-900 truncate" title={sheetTitle}>{sheetTitle || 'Untitled Sheet'}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="button" onClick={() => { setEditingSheet(true); setShowSheetPicker(false); }}>Change</Button>
+                  </div>
+                </div>
               )}
             </div>
 
             {showSheetPicker && (
-              <div className="border rounded-2xl p-3 bg-white shadow-sm max-h-64 overflow-auto space-y-2">
+              <div className="border border-gray-200 rounded-2xl p-3 bg-white shadow-lg max-h-72 overflow-auto space-y-2">
                 <div className="flex justify-between items-center mb-1">
-                  <h4 className="font-semibold text-sm">Your Recent Spreadsheets</h4>
+                  <h4 className="font-semibold text-sm text-gray-800">Your Recent Spreadsheets</h4>
                   <button
-                    className="text-xs text-gray-500 hover:text-gray-700"
+                    className="text-xs text-gray-500 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400 rounded"
                     onClick={() => setShowSheetPicker(false)}
                   >Close</button>
                 </div>
@@ -305,12 +346,14 @@ const Home: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => handleSelectSheet(s.id, s.name)}
-                        className={`w-full text-left px-2 py-1 rounded hover:bg-blue-50 text-sm ${spreadsheetId === s.id ? 'bg-blue-100' : ''}`}
+                        className={`group w-full text-left px-3 py-2 rounded-lg border transition-colors text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${spreadsheetId === s.id ? 'bg-blue-50 border-blue-300' : 'bg-gray-50 hover:bg-blue-50 border-gray-200'}`}
                       >
-                        <span className="font-medium">{s.name}</span>
-                        {s.modifiedTime && (
-                          <span className="ml-2 text-[10px] text-gray-500">{new Date(s.modifiedTime).toLocaleDateString()}</span>
-                        )}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-gray-900 truncate" title={s.name}>{s.name}</span>
+                          {s.modifiedTime && (
+                            <span className="text-[10px] text-gray-500 whitespace-nowrap">{new Date(s.modifiedTime).toLocaleDateString()}</span>
+                          )}
+                        </div>
                       </button>
                     </li>
                   ))}
