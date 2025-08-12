@@ -233,7 +233,7 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
 
 
         // add the html body as string (url encoded)
-        const baseLink = `https://csao-poa.vercel.dev/pdf?=`
+        const baseLink = `https://csao-poa.vercel.app/pdf?html=`
         const pdfLink = baseLink + encodeURIComponent(htmlBody);
         const rowData = ['UNSET', parsedData.organization, parsedData.title, parsedData.description, parsedData.startDate, parsedData.endDate, parsedData.time, parsedData.venue, parsedData.type, pdfLink, ''];
 
