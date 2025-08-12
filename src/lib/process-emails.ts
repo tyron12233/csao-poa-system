@@ -245,10 +245,17 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         if (!htmlBody) throw new Error('HTML body not found.');
 
         const parsedData = parseEmailBody(htmlBody);
+
+        if (true) {
+            const missing = ['Start Date', 'End Date']
+            callbacks.updateTask(messageId, { status: 'held', error: `${missing || 'Dates'} need review` });
+            return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
+        }
+
         // Disable academic year inference: strictly parse dates; if invalid/missing, hold the task.
         const startDate = parseDateNoInference(parsedData.startDate);
         const endDate = parseDateNoInference(parsedData.endDate);
-        if (true || !startDate || !endDate) {
+        if (!startDate || !endDate) {
             const missing = [!startDate ? 'Start Date' : null, !endDate ? 'End Date' : null].filter(Boolean).join(' & ');
             callbacks.updateTask(messageId, { status: 'held', error: `${missing || 'Dates'} need review` });
             return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
