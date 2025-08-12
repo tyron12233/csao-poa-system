@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
 import { processEmails as runProcessEmails, reprocessHeldEmailWithDates } from '../lib/process-emails';
-import type { EmailTask } from '../lib/process-emails';
+import type { EmailTask, EmailTaskStatus } from '../lib/process-emails';
 
 // Import reusable UI components
 import { Button } from './ui/button';
@@ -79,6 +79,11 @@ const Home: React.FC = () => {
   const [heldEndDate, setHeldEndDate] = useState<string>('');
   const [heldError, setHeldError] = useState<string | null>(null);
   const [heldSubmitting, setHeldSubmitting] = useState(false);
+  const [isLoadingHeldPreview, setIsLoadingHeldPreview] = useState(false);
+  const [heldPreviewHtml, setHeldPreviewHtml] = useState<string | null>(null);
+  const [heldPreviewSnippet, setHeldPreviewSnippet] = useState<string | null>(null);
+  // Tasks filter state
+  const [statusFilter, setStatusFilter] = useState<EmailTaskStatus | null>(null);
 
   // Load cached token/user on first mount
   useEffect(() => {
@@ -277,7 +282,23 @@ const Home: React.FC = () => {
     setHeldStartDate('');
     setHeldEndDate('');
     setHeldError(null);
+    setHeldPreviewHtml(null);
+    setHeldPreviewSnippet(null);
     setIsHeldDialogOpen(true);
+    if (!gapi) return;
+    setIsLoadingHeldPreview(true);
+    gapi.client.gmail.users.messages
+      .get({ userId: 'me', id: task.id })
+      .then(({ result }: any) => {
+        const html = getEmailBodyHtml(result.payload);
+        setHeldPreviewHtml(html || null);
+        setHeldPreviewSnippet(result.snippet || null);
+      })
+      .catch(() => {
+        setHeldPreviewHtml(null);
+        setHeldPreviewSnippet('Failed to load email content.');
+      })
+      .finally(() => setIsLoadingHeldPreview(false));
   };
 
   const submitHeldDates = async (e: React.FormEvent) => {
@@ -622,17 +643,35 @@ const Home: React.FC = () => {
               const counts = tasks.reduce<Record<string, number>>((acc, t) => {
                 acc[t.status] = (acc[t.status] || 0) + 1; return acc;
               }, {});
-              const order = ['queued', 'fetching', 'parsing', 'building_request', 'writing', 'done', 'held', 'error'];
+              const order: EmailTaskStatus[] = ['queued', 'fetching', 'parsing', 'uploading_pdf', 'building_request', 'writing', 'done', 'skipped', 'held', 'error'];
               return (
                 <div className="mt-8 space-y-4">
                   <div className="flex flex-wrap gap-3 items-center">
                     <h3 className="text-lg font-semibold text-gray-800 mr-2">Tasks</h3>
-                    {order.filter(k => counts[k]).map(k => (
-                      <span key={k} className="text-[11px] uppercase tracking-wide bg-gray-200 text-gray-700 px-2 py-1 rounded-full font-medium">
-                        {k.replace('_', ' ')}: {counts[k]}
-                      </span>
-                    ))}
-                    <span className="text-[11px] text-gray-500 ml-auto">Total: {tasks.length}</span>
+                    {/* All chip */}
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter(null)}
+                      className={`text-[11px] uppercase tracking-wide px-2 py-1 rounded-full font-medium border transition-colors ${statusFilter === null ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-700 border-gray-300 hover:border-blue-400'}`}
+                      title="Show all tasks"
+                    >
+                      All: {tasks.length}
+                    </button>
+                    {order.filter(k => counts[k]).map((k) => {
+                      const selected = statusFilter === k;
+                      return (
+                        <button
+                          key={k}
+                          type="button"
+                          onClick={() => setStatusFilter(selected ? null : k)}
+                          className={`text-[11px] uppercase tracking-wide px-2 py-1 rounded-full font-medium border transition-colors ${selected ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-700 border-gray-300 hover:border-blue-400'}`}
+                          title={`Filter by ${k.replace('_', ' ')}`}
+                        >
+                          {k.replace('_', ' ')}: {counts[k]}
+                        </button>
+                      );
+                    })}
+                    <span className="text-[11px] text-gray-500 ml-auto">{statusFilter ? `Showing: ${statusFilter.replace('_', ' ')}` : 'Showing: All'}</span>
                   </div>
                   {counts['held'] && (
                     <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-sm">
@@ -641,7 +680,7 @@ const Home: React.FC = () => {
                     </div>
                   )}
                   <ul className="flex flex-wrap gap-2">
-                    {tasks.map((task: EmailTask) => (
+                    {(statusFilter ? tasks.filter(t => t.status === statusFilter) : tasks).map((task: EmailTask) => (
                       <TaskItem
                         key={task.id}
                         task={task}
@@ -732,11 +771,33 @@ const Home: React.FC = () => {
           </div>
         )}
       </Modal>
-      <Modal open={isHeldDialogOpen} onClose={() => setIsHeldDialogOpen(false)} title="Set Dates to Reprocess" maxWidthClass="max-w-md">
+      <Modal open={isHeldDialogOpen} onClose={() => setIsHeldDialogOpen(false)} title="Set Dates to Reprocess" maxWidthClass="max-w-4xl">
         <form onSubmit={submitHeldDates} className="space-y-4">
           <div className="text-sm text-gray-700">
             <p className="font-medium">{heldTask?.subject || 'Held Task'}</p>
             <p className="text-xs text-gray-500">Specify Start and End dates for this activity and we will write it to the appropriate monthly sheet(s).</p>
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-gray-600">Email Preview</p>
+            {isLoadingHeldPreview && (
+              <p className="text-sm text-gray-600">Loading message…</p>
+            )}
+            {!isLoadingHeldPreview && (heldPreviewHtml || heldPreviewSnippet) && (
+              heldPreviewHtml ? (
+                <div className="border rounded-lg overflow-hidden bg-white">
+                  <iframe
+                    title="Held email preview"
+                    sandbox=""
+                    className="w-full h-[45vh]"
+                    srcDoc={heldPreviewHtml}
+                  />
+                </div>
+              ) : (
+                <pre className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-auto max-h-[45vh]">
+                  {heldPreviewSnippet}
+                </pre>
+              )
+            )}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
