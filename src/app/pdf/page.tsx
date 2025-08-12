@@ -1,35 +1,14 @@
-"use client"
+"use client";
 
-import { useSearchParams } from "next/navigation";
-import { useEffect, useRef } from "react";
-import jsPDF from "jspdf";
-import html2canvas from "html2canvas";
+import dynamic from "next/dynamic";
+import { Suspense } from "react";
 
-export default function App() {
-    const searchParams = useSearchParams();
-    const htmlString = decodeURIComponent(searchParams.get("html") || "");
-    const contentRef = useRef<HTMLDivElement>(null);
+const PdfClient = dynamic(() => import("./PdfClient"), { ssr: false });
 
-    useEffect(() => {
-        if (!htmlString || !contentRef.current) return;
-
-        // Wait for the DOM to render the HTML
-        setTimeout(async () => {
-            const input = contentRef.current!;
-            const canvas = await html2canvas(input);
-            const imgData = canvas.toDataURL("image/png");
-            const pdf = new jsPDF();
-            const imgProps = pdf.getImageProperties(imgData);
-            const pdfWidth = pdf.internal.pageSize.getWidth();
-            const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-            pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
-            pdf.save("document.pdf");
-        }, 100);
-    }, [htmlString]);
-
+export default function Page() {
     return (
-        <div ref={contentRef} style={{ position: "absolute", left: "-9999px", top: 0 }}>
-            <span dangerouslySetInnerHTML={{ __html: htmlString }} />
-        </div>
+        <Suspense fallback={null}>
+            <PdfClient />
+        </Suspense>
     );
 }
