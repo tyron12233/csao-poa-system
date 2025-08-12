@@ -30,7 +30,7 @@ export default function PdfClient() {
     }, [htmlString]);
 
     return (
-        <div ref={contentRef} style={{ position: "absolute", left: "-9999px", top: 0 }}>
+        <div ref={contentRef}>
             <span dangerouslySetInnerHTML={{ __html: htmlString }} />
         </div>
     );

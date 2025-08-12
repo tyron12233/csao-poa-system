@@ -152,8 +152,26 @@ const formatMonthYear = (date: Date): string =>
 
 // --- Sheets helpers ---
 const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) => {
+    // Build cell values, supporting formulas and hyperlinks
+    const values = rowData.map(val => {
+        if (val && typeof val === 'object') {
+            // Support explicit formula injection
+            if ('formula' in val && typeof (val as any).formula === 'string') {
+                return { userEnteredValue: { formulaValue: (val as any).formula } };
+            }
+            // Support hyperlink shorthand: { hyperlink: { url, text? } }
+            if ('hyperlink' in val && (val as any).hyperlink?.url) {
+                const url = String((val as any).hyperlink.url).replace(/"/g, '""');
+                const text = String((val as any).hyperlink.text ?? (val as any).hyperlink.url).replace(/"/g, '""');
+                const formula = `=HYPERLINK("${url}","${text}")`;
+                return { userEnteredValue: { formulaValue: formula } };
+            }
+        }
+        return { userEnteredValue: { stringValue: String(val ?? '') } };
+    });
+
     const requests: any[] = [
-        { updateCells: { start: { sheetId, rowIndex, columnIndex: 0 }, rows: [{ values: rowData.map(val => ({ userEnteredValue: { stringValue: String(val) } })) }], fields: 'userEnteredValue' } },
+        { updateCells: { start: { sheetId, rowIndex, columnIndex: 0 }, rows: [{ values }], fields: 'userEnteredValue' } },
         { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: rowIndex, endIndex: rowIndex + 1 }, properties: { pixelSize: 160 }, fields: 'pixelSize' } },
         { repeatCell: { range: { sheetId, startRowIndex: rowIndex, endRowIndex: rowIndex + 1 }, cell: { userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', wrapStrategy: 'CLIP' } }, fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)' } },
         { repeatCell: { range: { sheetId, startRowIndex: rowIndex, endRowIndex: rowIndex + 1, startColumnIndex: 3, endColumnIndex: 4 }, cell: { userEnteredFormat: { horizontalAlignment: 'LEFT', wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat(horizontalAlignment,wrapStrategy)' } },
@@ -235,7 +253,19 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         // add the html body as string (url encoded)
         const baseLink = `https://csao-poa.vercel.app/pdf?html=`
         const pdfLink = baseLink + encodeURIComponent(htmlBody);
-        const rowData = ['UNSET', parsedData.organization, parsedData.title, parsedData.description, parsedData.startDate, parsedData.endDate, parsedData.time, parsedData.venue, parsedData.type, pdfLink, ''];
+        const rowData = [
+            'UNSET',
+            parsedData.organization,
+            parsedData.title,
+            parsedData.description,
+            parsedData.startDate,
+            parsedData.endDate,
+            parsedData.time,
+            parsedData.venue,
+            parsedData.type,
+            { hyperlink: { url: pdfLink, text: 'PDF LINK' } },
+            ''
+        ];
 
         return { status: 'success', data: { messageId, subject, parsedData, monthSheetNames, rowData } };
     } catch (err: any) {
