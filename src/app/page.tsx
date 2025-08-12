@@ -68,6 +68,10 @@ const Home: React.FC = () => {
   const [acadStartYear, setAcadStartYear] = useState<number>(new Date().getFullYear());
   const [manualStartDate, setManualStartDate] = useState<string>('');
   const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Error email details modal state
+  const [isErrorDetailsOpen, setIsErrorDetailsOpen] = useState(false);
+  const [isLoadingErrorDetails, setIsLoadingErrorDetails] = useState(false);
+  const [errorEmail, setErrorEmail] = useState<{ subject: string; from?: string; date?: string; html?: string; snippet?: string } | null>(null);
 
   // Load cached token/user on first mount
   useEffect(() => {
@@ -210,6 +214,56 @@ const Home: React.FC = () => {
       setIsProcessing(false);
     }
   }, [spreadsheetId, useDateFilter]);
+
+  // --- Error details helpers ---
+  const decodeBase64Url = (encoded: string): string => {
+    try {
+      return decodeURIComponent(
+        atob(encoded.replace(/-/g, '+').replace(/_/g, '/'))
+          .split('')
+          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+    } catch {
+      return '';
+    }
+  };
+
+  const getEmailBodyHtml = (payload: any): string => {
+    function find(parts: any[]): string | null {
+      for (const p of parts) {
+        if (p.mimeType === 'text/html' && p.body?.data) return decodeBase64Url(p.body.data);
+        if (p.parts) {
+          const n = find(p.parts);
+          if (n) return n;
+        }
+      }
+      return null;
+    }
+    if (payload.mimeType === 'text/html' && payload.body?.data) return decodeBase64Url(payload.body.data);
+    if (payload.parts) return find(payload.parts) || '';
+    return '';
+  };
+
+  const openErrorDetails = async (task: EmailTask) => {
+    if (!gapi) return;
+    setIsErrorDetailsOpen(true);
+    setIsLoadingErrorDetails(true);
+    setErrorEmail(null);
+    try {
+      const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: task.id });
+      const headers: Array<{ name: string; value: string }> = result.payload.headers || [];
+      const subject = headers.find((h) => h.name.toLowerCase() === 'subject')?.value || task.subject || 'No Subject';
+      const from = headers.find((h) => h.name.toLowerCase() === 'from')?.value;
+      const date = headers.find((h) => h.name.toLowerCase() === 'date')?.value;
+      const html = getEmailBodyHtml(result.payload);
+      setErrorEmail({ subject, from, date, html, snippet: result.snippet });
+    } catch (e) {
+      setErrorEmail({ subject: task.subject || 'No Subject', snippet: 'Failed to load email content.' });
+    } finally {
+      setIsLoadingErrorDetails(false);
+    }
+  };
 
   // Simulation handler removed per requirement to remove simulate processing feature.
 
@@ -476,7 +530,7 @@ const Home: React.FC = () => {
                 <Input type="date" value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)} />
               </div>
               <div className="sm:col-span-3 text-[11px] text-gray-500 leading-snug">
-                The academic year sets how incomplete or ambiguous year values in emails are inferred. Manual date (if set) restricts Gmail query to messages after that day.
+                Date inference by academic year is disabled to avoid incorrect years. If a date cannot be parsed, the item will be held for your review. Manual date (if set) restricts the Gmail query to messages after that day.
               </div>
             </div>
 
@@ -505,7 +559,7 @@ const Home: React.FC = () => {
               const counts = tasks.reduce<Record<string, number>>((acc, t) => {
                 acc[t.status] = (acc[t.status] || 0) + 1; return acc;
               }, {});
-              const order = ['queued', 'fetching', 'parsing', 'building_request', 'writing', 'done', 'error'];
+              const order = ['queued', 'fetching', 'parsing', 'building_request', 'writing', 'done', 'held', 'error'];
               return (
                 <div className="mt-8 space-y-4">
                   <div className="flex flex-wrap gap-3 items-center">
@@ -517,9 +571,20 @@ const Home: React.FC = () => {
                     ))}
                     <span className="text-[11px] text-gray-500 ml-auto">Total: {tasks.length}</span>
                   </div>
+                  {counts['held'] && (
+                    <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-sm">
+                      <p className="font-medium mb-1">Action needed: Some items are on hold due to missing or invalid dates.</p>
+                      <p className="text-xs">Please specify the correct Start Date and End Date for each held item in the Google Sheet or the original email, then re-run processing.</p>
+                    </div>
+                  )}
                   <ul className="flex flex-wrap gap-2">
                     {tasks.map((task: EmailTask) => (
-                      <TaskItem key={task.id} task={task} compact />
+                      <TaskItem
+                        key={task.id}
+                        task={task}
+                        compact
+                        onClick={task.status === 'error' ? () => openErrorDetails(task) : undefined}
+                      />
                     ))}
                   </ul>
                 </div>
@@ -563,6 +628,40 @@ const Home: React.FC = () => {
             <Button type="button" onClick={() => setIsFolderDialogOpen(false)}>Close</Button>
           </div>
         </div>
+      </Modal>
+      <Modal open={isErrorDetailsOpen} onClose={() => setIsErrorDetailsOpen(false)} title="Email Details" maxWidthClass="max-w-4xl">
+        {isLoadingErrorDetails && (
+          <p className="text-sm text-gray-600">Loading message…</p>
+        )}
+        {!isLoadingErrorDetails && errorEmail && (
+          <div className="space-y-3">
+            <div>
+              <p className="text-sm text-gray-500">Subject</p>
+              <p className="text-base font-medium text-gray-900">{errorEmail.subject}</p>
+            </div>
+            {(errorEmail.from || errorEmail.date) && (
+              <div className="text-xs text-gray-600">
+                {errorEmail.from && <p><span className="font-semibold">From:</span> {errorEmail.from}</p>}
+                {errorEmail.date && <p><span className="font-semibold">Date:</span> {new Date(errorEmail.date).toLocaleString()}</p>}
+              </div>
+            )}
+            {errorEmail.html ? (
+              <div className="border rounded-lg overflow-hidden">
+                <iframe
+                  title="Email preview"
+                  sandbox=""
+                  className="w-full h-[60vh] bg-white"
+                  srcDoc={errorEmail.html}
+                />
+              </div>
+            ) : (
+              <pre className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-auto max-h-[60vh]">
+                {errorEmail.snippet || 'No content available.'}
+              </pre>
+            )}
+            <p className="text-xs text-gray-500">Tip: Use this preview to copy the correct dates and update your sheet or reply to the original email, then re-run processing.</p>
+          </div>
+        )}
       </Modal>
     </div>
   );

@@ -14,10 +14,11 @@ interface ActivityDetails {
 
 // --- Types ---
 export interface UserProfile { email: string; name: string; picture: string; }
-export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'uploading_pdf' | 'building_request' | 'writing' | 'done' | 'skipped' | 'error';
+export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'uploading_pdf' | 'building_request' | 'writing' | 'done' | 'skipped' | 'held' | 'error';
 export interface EmailTask { id: string; subject: string; status: EmailTaskStatus; error?: string; }
 export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, monthSheetNames: string[], rowData: any[] } };
-export type ParsedResult = ParsedSuccessResult | { status: 'error', messageId: string, error: string };
+export type ParsedHeldResult = { status: 'held', messageId: string, subject: string, reason: string, parsedData: any };
+export type ParsedResult = ParsedSuccessResult | ParsedHeldResult | { status: 'error', messageId: string, error: string };
 
 // --- Config ---
 const LOG_SHEET_NAME = 'POA Log';
@@ -131,19 +132,11 @@ const parseEmailBody = (htmlBody: string) => {
     };
 };
 
-// Infer academic year based on configured academic year start (month 1-12) & start year.
-const parseDateWithAcademicYear = (dateString: string, acadYearStartYear: number, acadYearStartMonth: number): Date | null => {
+// Date parsing without academic year inference (no remapping of years).
+const parseDateNoInference = (dateString: string): Date | null => {
     if (!dateString || dateString === 'Not Found') return null;
     const d = new Date(dateString);
     if (isNaN(d.getTime())) return null;
-    // Academic year spans from startMonth/startYear to (startMonth-1)/(startYear+1)
-    const monthIndex = d.getMonth(); // 0-based
-    // If date year outside allowed academic year range, remap.
-    const allowedYears = new Set([acadYearStartYear, acadYearStartYear + 1]);
-    if (!allowedYears.has(d.getFullYear())) {
-        const targetYear = (monthIndex + 1) >= acadYearStartMonth ? acadYearStartYear : (acadYearStartYear + 1);
-        d.setFullYear(targetYear);
-    }
     return d;
 };
 
@@ -227,9 +220,14 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         if (!htmlBody) throw new Error('HTML body not found.');
 
         const parsedData = parseEmailBody(htmlBody);
-        const startDate = parseDateWithAcademicYear(parsedData.startDate, acadYearStartYear, acadYearStartMonth);
-        const endDate = parseDateWithAcademicYear(parsedData.endDate, acadYearStartYear, acadYearStartMonth);
-        if (!startDate || !endDate) throw new Error(`Invalid dates for: ${parsedData.title}`);
+        // Disable academic year inference: strictly parse dates; if invalid/missing, hold the task.
+        const startDate = parseDateNoInference(parsedData.startDate);
+        const endDate = parseDateNoInference(parsedData.endDate);
+        if (!startDate || !endDate) {
+            const missing = [!startDate ? 'Start Date' : null, !endDate ? 'End Date' : null].filter(Boolean).join(' & ');
+            callbacks.updateTask(messageId, { status: 'held', error: `${missing || 'Dates'} need review` });
+            return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
+        }
 
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
@@ -401,8 +399,13 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
             parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks, uploadFolderId, academicYearStartYear, academicYearStartMonth))));
         }
         const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
+        const heldResults = parsedResults.filter((p): p is ParsedHeldResult => p.status === 'held');
         const successfulIds = successfulResults.map(p => p.data.messageId);
+        const heldIds = heldResults.map(p => p.messageId);
         callbacks.updateTasksBulk(successfulIds, { status: 'building_request' });
+        if (heldIds.length) {
+            callbacks.updateTasksBulk(heldIds, { status: 'held' });
+        }
 
         // Pre-compute sheet state for this batch
         const dataBySheet = new Map<string, any[][]>();
@@ -468,16 +471,38 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
             await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: masterRequest } });
         }
 
-        const logRows = successfulResults.map(res => [new Date().toISOString(), res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]);
+        const logRows = [
+            ...successfulResults.map(res => [new Date().toISOString(), res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]),
+            ...heldResults.map(res => [new Date().toISOString(), res.messageId, 'Held (dates needed)', res.parsedData.organization, res.parsedData.title])
+        ];
         if (logRows.length > 0) {
             await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: LOG_SHEET_NAME, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
         }
         callbacks.updateTasksBulk(successfulIds, { status: 'done' });
         totalProcessed += successfulResults.length;
-        callbacks.status(`Batch ${batchIndex + 1} complete. Processed ${successfulResults.length} emails (Total so far: ${totalProcessed}).`);
+        const heldMsg = heldResults.length ? `, held ${heldResults.length} for date review` : '';
+        callbacks.status(`Batch ${batchIndex + 1} complete. Processed ${successfulResults.length} emails${heldMsg} (Total so far: ${totalProcessed}).`);
     }
 
     callbacks.status(`Process complete. ${totalProcessed} new emails were successfully processed in ${Math.ceil(allMessages.length / BATCH_SIZE)} batch(es).`);
+    // After all batches, summarize any held items and ask user to specify/fix dates.
+    try {
+        const logData = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId, range: `${LOG_SHEET_NAME}!A2:E` });
+        const rows: any[] = logData.result.values || [];
+        const heldNow = rows.filter(r => r[2] && String(r[2]).toLowerCase().startsWith('held'));
+        if (heldNow.length > 0) {
+            const list = heldNow.map(r => `• ${r[3] || 'Unknown Org'} — ${r[4] || 'Untitled Activity'} (Message ID: ${r[1]})`).join('\n');
+            callbacks.status([
+                'Action needed: Some items are on hold due to missing/invalid dates.',
+                'Please review and specify the correct Start Date and End Date for each held item:',
+                list,
+                'Next steps:',
+                '- Reply with corrected dates in the original email OR',
+                `- Manually add/update the dates for the activity in the appropriate monthly sheet (columns "${MONTHLY_HEADERS[4]}" and "${MONTHLY_HEADERS[5]}").`,
+                '- Then re-run “Process Emails” to include them.'
+            ].join('\n'));
+        }
+    } catch { /* non-blocking */ }
     return { processed: totalProcessed };
 }
 

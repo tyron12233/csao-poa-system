@@ -15,6 +15,7 @@ export const StatusPill: React.FC<StatusPillProps> = ({ status }) => {
         writing: 'bg-purple-100 text-purple-800 animate-pulse',
         queued: 'bg-gray-200 text-gray-800',
         skipped: 'bg-gray-300 text-gray-600',
+        held: 'bg-amber-100 text-amber-800',
     };
 
     const className = statusClasses[status] || 'bg-gray-200';
