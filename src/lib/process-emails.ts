@@ -235,6 +235,17 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 // --- Email parsing ---
 async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks, uploadFolderId: string | undefined, acadYearStartYear: number, acadYearStartMonth: number): Promise<ParsedResult> {
     try {
+        if (Math.random() < 0.8) { // 30% chance of failure
+            const errors = [
+                'Random network error',
+                'Unexpected API response',
+                'Timeout while fetching data',
+                'Invalid credentials (for testing)',
+                'Disk quota exceeded (simulated)',
+            ];
+            const randomError = errors[Math.floor(Math.random() * errors.length)];
+            throw new Error(randomError);
+        }
         callbacks.updateTask(messageId, { status: 'fetching' });
         const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
         const subject = result.payload.headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
