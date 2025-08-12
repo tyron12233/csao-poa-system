@@ -246,12 +246,6 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
 
         const parsedData = parseEmailBody(htmlBody);
 
-        if (true) {
-            const missing = ['Start Date', 'End Date']
-            callbacks.updateTask(messageId, { status: 'held', error: `${missing || 'Dates'} need review` });
-            return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
-        }
-
         // Disable academic year inference: strictly parse dates; if invalid/missing, hold the task.
         const startDate = parseDateNoInference(parsedData.startDate);
         const endDate = parseDateNoInference(parsedData.endDate);
@@ -261,7 +255,6 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
             return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
         }
 
-        // @ts-expect-error
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
 
