@@ -261,6 +261,7 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
             return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
         }
 
+        // @ts-expect-error
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
 
