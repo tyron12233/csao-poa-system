@@ -554,3 +554,126 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
 // --- Simulation (no Gmail dependency) ---
 
 export const SheetsConfig = { LOG_SHEET_NAME, LOG_HEADERS, MONTHLY_HEADERS };
+
+// --- Manual reprocess for a single held email ---
+export async function reprocessHeldEmailWithDates(
+    gapi: any,
+    params: {
+        spreadsheetId: string;
+        messageId: string;
+        manualStartDate: string; // yyyy-mm-dd
+        manualEndDate: string;   // yyyy-mm-dd
+        uploadFolderId?: string;
+        callbacks: Callbacks;
+    }
+): Promise<{ status: 'done' | 'error'; message?: string }> {
+    const { spreadsheetId, messageId, manualStartDate, manualEndDate, uploadFolderId, callbacks } = params;
+    try {
+        // Validate dates
+        const sd = new Date(manualStartDate);
+        const ed = new Date(manualEndDate);
+        if (isNaN(sd.getTime()) || isNaN(ed.getTime())) {
+            throw new Error('Please provide valid Start and End dates.');
+        }
+        if (sd > ed) {
+            throw new Error('Start Date must be on or before End Date.');
+        }
+
+        callbacks.updateTask(messageId, { status: 'fetching', error: undefined });
+        const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
+        const subject: string = result.payload.headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
+        callbacks.updateTask(messageId, { subject, status: 'parsing' });
+
+        const htmlBody = getEmailBodyHtml(result.payload);
+        const parsed = parseEmailBody(htmlBody);
+
+        // Override dates with manual input for safety
+        const startDateStr = manualStartDate;
+        const endDateStr = manualEndDate;
+        const startDate = new Date(startDateStr);
+        const endDate = new Date(endDateStr);
+
+        // Compute month sheets and row data
+        const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
+
+        // Build PDF link (same as batch processor)
+        const baseLink = `https://csao-poa.vercel.app/pdf?html=`;
+        const pdfLink = baseLink + encodeURIComponent(htmlBody);
+
+        const rowData = [
+            'UNSET',
+            parsed.organization,
+            parsed.title,
+            parsed.description,
+            startDateStr,
+            endDateStr,
+            parsed.time,
+            parsed.venue,
+            parsed.type,
+            { hyperlink: { url: pdfLink, text: 'PDF LINK' } },
+            ''
+        ];
+
+        callbacks.updateTask(messageId, { status: 'building_request' });
+
+        // Ensure required sheets exist and are styled
+        const initialSheetProps = await gapi.client.sheets.spreadsheets.get({ spreadsheetId });
+        const existingSheets = new Map<string, any>(initialSheetProps.result.sheets?.map((s: any) => [s.properties.title, { sheetId: s.properties.sheetId }]))
+        const needed = new Set<string>([LOG_SHEET_NAME, ...monthSheetNames]);
+        const toCreate = [...needed].filter(name => !existingSheets.has(name));
+        if (toCreate.length > 0) {
+            const createRequests = toCreate.map(title => ({ addSheet: { properties: { title } } }));
+            const createResult = await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: createRequests } });
+            const headerRequests: any[] = [];
+            createResult.result.replies?.forEach((reply: any) => {
+                const props = reply.addSheet.properties;
+                existingSheets.set(props.title, { sheetId: props.sheetId });
+                const headers = props.title === LOG_SHEET_NAME ? LOG_HEADERS : MONTHLY_HEADERS;
+                headerRequests.push(...generateHeaderRequests(props.sheetId, headers));
+            });
+            if (headerRequests.length > 0) {
+                await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: headerRequests } });
+            }
+        }
+
+        // Determine next row for each needed monthly sheet
+        const sheetState = new Map<string, { sheetId: number, lastRow: number }>();
+        const ranges = monthSheetNames.filter(name => existingSheets.has(name)).map(name => `${name}!A:A`);
+        if (ranges.length > 0) {
+            const sheetValues = await gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges });
+            sheetValues.result.valueRanges?.forEach((rangeResult: any) => {
+                const sheetName = rangeResult.range.split('!')[0].replace(/'/g, '');
+                const lastRow = rangeResult.values?.length || 0;
+                if (existingSheets.has(sheetName)) sheetState.set(sheetName, { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow });
+            });
+        }
+
+        const masterRequest: any[] = [];
+        for (const sheetName of monthSheetNames) {
+            const state = sheetState.get(sheetName) || { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow: 0 };
+            masterRequest.push({ appendDimension: { sheetId: state.sheetId, dimension: 'ROWS', length: 1 } });
+            masterRequest.push(...generateRowRequests(state.sheetId, state.lastRow, rowData));
+        }
+
+        callbacks.updateTask(messageId, { status: 'writing' });
+        if (masterRequest.length > 0) {
+            await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: masterRequest } });
+        }
+
+        // Append to log
+        await gapi.client.sheets.spreadsheets.values.append({
+            spreadsheetId,
+            range: LOG_SHEET_NAME,
+            valueInputOption: 'USER_ENTERED',
+            insertDataOption: 'INSERT_ROWS',
+            resource: { values: [[new Date().toISOString(), messageId, 'Processed (manual dates)', parsed.organization, parsed.title]] }
+        });
+
+        callbacks.updateTask(messageId, { status: 'done', error: undefined });
+        return { status: 'done' };
+    } catch (e: any) {
+        const msg = e.result?.error?.message || e.message || 'Failed to reprocess held email.';
+        callbacks.updateTask(messageId, { status: 'error', error: msg });
+        return { status: 'error', message: msg };
+    }
+}

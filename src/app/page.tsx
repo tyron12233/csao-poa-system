@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
-import { processEmails as runProcessEmails } from '../lib/process-emails';
+import { processEmails as runProcessEmails, reprocessHeldEmailWithDates } from '../lib/process-emails';
 import type { EmailTask } from '../lib/process-emails';
 
 // Import reusable UI components
@@ -72,6 +72,13 @@ const Home: React.FC = () => {
   const [isErrorDetailsOpen, setIsErrorDetailsOpen] = useState(false);
   const [isLoadingErrorDetails, setIsLoadingErrorDetails] = useState(false);
   const [errorEmail, setErrorEmail] = useState<{ subject: string; from?: string; date?: string; html?: string; snippet?: string } | null>(null);
+  // Held-date modal state
+  const [isHeldDialogOpen, setIsHeldDialogOpen] = useState(false);
+  const [heldTask, setHeldTask] = useState<EmailTask | null>(null);
+  const [heldStartDate, setHeldStartDate] = useState<string>('');
+  const [heldEndDate, setHeldEndDate] = useState<string>('');
+  const [heldError, setHeldError] = useState<string | null>(null);
+  const [heldSubmitting, setHeldSubmitting] = useState(false);
 
   // Load cached token/user on first mount
   useEffect(() => {
@@ -262,6 +269,62 @@ const Home: React.FC = () => {
       setErrorEmail({ subject: task.subject || 'No Subject', snippet: 'Failed to load email content.' });
     } finally {
       setIsLoadingErrorDetails(false);
+    }
+  };
+
+  const openHeldDialog = (task: EmailTask) => {
+    setHeldTask(task);
+    setHeldStartDate('');
+    setHeldEndDate('');
+    setHeldError(null);
+    setIsHeldDialogOpen(true);
+  };
+
+  const submitHeldDates = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!heldTask) return;
+    if (!spreadsheetId) {
+      setHeldError('Please select a target Google Sheet first.');
+      return;
+    }
+    if (!heldStartDate || !heldEndDate) {
+      setHeldError('Both Start and End dates are required.');
+      return;
+    }
+    const sd = new Date(heldStartDate);
+    const ed = new Date(heldEndDate);
+    if (isNaN(sd.getTime()) || isNaN(ed.getTime())) {
+      setHeldError('Please enter valid dates.');
+      return;
+    }
+    if (sd > ed) {
+      setHeldError('Start Date must be on or before End Date.');
+      return;
+    }
+    setHeldError(null);
+    setHeldSubmitting(true);
+    try {
+      await reprocessHeldEmailWithDates(gapi, {
+        spreadsheetId,
+        messageId: heldTask.id,
+        manualStartDate: heldStartDate,
+        manualEndDate: heldEndDate,
+        uploadFolderId: uploadFolderId || undefined,
+        callbacks: {
+          status: (msg: string) => setStatusMessage(msg),
+          queue: (_tasks: EmailTask[]) => { },
+          updateTask: (id: string, patch: Partial<EmailTask>) =>
+            setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t))),
+          updateTasksBulk: (ids: string[], patch: Partial<EmailTask>) =>
+            setTasks((prev) => prev.map((t) => (ids.includes(t.id) ? { ...t, ...patch } : t))),
+        },
+      });
+      setIsHeldDialogOpen(false);
+      setHeldTask(null);
+    } catch (err: any) {
+      setHeldError(err?.message || 'Failed to reprocess the held task.');
+    } finally {
+      setHeldSubmitting(false);
     }
   };
 
@@ -583,7 +646,13 @@ const Home: React.FC = () => {
                         key={task.id}
                         task={task}
                         compact
-                        onClick={task.status === 'error' ? () => openErrorDetails(task) : undefined}
+                        onClick={
+                          task.status === 'error'
+                            ? () => openErrorDetails(task)
+                            : task.status === 'held'
+                              ? () => openHeldDialog(task)
+                              : undefined
+                        }
                       />
                     ))}
                   </ul>
@@ -662,6 +731,29 @@ const Home: React.FC = () => {
             <p className="text-xs text-gray-500">Tip: Use this preview to copy the correct dates and update your sheet or reply to the original email, then re-run processing.</p>
           </div>
         )}
+      </Modal>
+      <Modal open={isHeldDialogOpen} onClose={() => setIsHeldDialogOpen(false)} title="Set Dates to Reprocess" maxWidthClass="max-w-md">
+        <form onSubmit={submitHeldDates} className="space-y-4">
+          <div className="text-sm text-gray-700">
+            <p className="font-medium">{heldTask?.subject || 'Held Task'}</p>
+            <p className="text-xs text-gray-500">Specify Start and End dates for this activity and we will write it to the appropriate monthly sheet(s).</p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-gray-600 mb-1">Start Date</label>
+              <Input type="date" value={heldStartDate} onChange={(e) => setHeldStartDate(e.target.value)} required />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-600 mb-1">End Date</label>
+              <Input type="date" value={heldEndDate} onChange={(e) => setHeldEndDate(e.target.value)} required />
+            </div>
+          </div>
+          {heldError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{heldError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" onClick={() => setIsHeldDialogOpen(false)} disabled={heldSubmitting}>Cancel</Button>
+            <Button type="submit" disabled={heldSubmitting}>{heldSubmitting ? 'Reprocessing…' : 'Reprocess'}</Button>
+          </div>
+        </form>
       </Modal>
     </div>
   );
