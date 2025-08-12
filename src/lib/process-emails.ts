@@ -235,17 +235,7 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 // --- Email parsing ---
 async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks, uploadFolderId: string | undefined, acadYearStartYear: number, acadYearStartMonth: number): Promise<ParsedResult> {
     try {
-        if (Math.random() < 0.8) { // 30% chance of failure
-            const errors = [
-                'Random network error',
-                'Unexpected API response',
-                'Timeout while fetching data',
-                'Invalid credentials (for testing)',
-                'Disk quota exceeded (simulated)',
-            ];
-            const randomError = errors[Math.floor(Math.random() * errors.length)];
-            throw new Error(randomError);
-        }
+
         callbacks.updateTask(messageId, { status: 'fetching' });
         const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
         const subject = result.payload.headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
@@ -258,7 +248,7 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         // Disable academic year inference: strictly parse dates; if invalid/missing, hold the task.
         const startDate = parseDateNoInference(parsedData.startDate);
         const endDate = parseDateNoInference(parsedData.endDate);
-        if (!startDate || !endDate) {
+        if (true || !startDate || !endDate) {
             const missing = [!startDate ? 'Start Date' : null, !endDate ? 'End Date' : null].filter(Boolean).join(' & ');
             callbacks.updateTask(messageId, { status: 'held', error: `${missing || 'Dates'} need review` });
             return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
