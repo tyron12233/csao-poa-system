@@ -9,6 +9,7 @@ interface ActivityDetails {
     time: string;
     venue: string;
     type: string;
+    htmlString: string;
 }
 
 // --- Types ---
@@ -56,16 +57,6 @@ const getEmailBodyHtml = (payload: any): string => {
     return '';
 };
 
-const extractDataFromHtml = (html: string, label: string): string => {
-    const m = html.match(new RegExp(`>${label}</td>\\s*<td[^>]*>(.*?)</td>`, 's'));
-    if (m && m[1]) {
-        const el = document.createElement('div');
-        el.innerHTML = m[1];
-        return el.textContent?.trim() || 'Not Found';
-    }
-    return 'Not Found';
-};
-
 /**
  * Parses event details from an HTML email body using DOM parsing with TypeScript.
  *
@@ -90,6 +81,8 @@ function parseActivityDetailsFromHtml(htmlBody: string): Partial<ActivityDetails
     // The details object is typed as a Partial, meaning it will have some or all
     // of the properties from ActivityDetails.
     const details: Partial<ActivityDetails> = {};
+
+    details.htmlString = htmlBody;
 
     try {
         const doc = Document.parseHTMLUnsafe(htmlBody);
@@ -239,16 +232,11 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
         if (!startDate || !endDate) throw new Error(`Invalid dates for: ${parsedData.title}`);
 
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
-        // Generate & upload PDF (optional)
-        let pdfLink = '';
-        if (uploadFolderId) {
-            try {
-                callbacks.updateTask(messageId, { status: 'uploading_pdf' });
-                pdfLink = await generateAndUploadPdf(gapi, htmlBody, subject, uploadFolderId);
-            } catch (e: any) {
-                console.warn('PDF upload failed', e);
-            }
-        }
+
+
+        // add the html body as string (url encoded)
+        const baseLink = `https://csao-poa.vercel.dev/pdf?=`
+        const pdfLink = baseLink + encodeURIComponent(htmlBody);
         const rowData = ['UNSET', parsedData.organization, parsedData.title, parsedData.description, parsedData.startDate, parsedData.endDate, parsedData.time, parsedData.venue, parsedData.type, pdfLink, ''];
 
         return { status: 'success', data: { messageId, subject, parsedData, monthSheetNames, rowData } };
