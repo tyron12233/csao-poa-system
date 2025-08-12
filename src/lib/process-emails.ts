@@ -153,7 +153,7 @@ const formatMonthYear = (date: Date): string =>
 // --- Sheets helpers ---
 const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) => {
     // Build cell values, supporting formulas and hyperlinks
-    const values = rowData.map(val => {
+    const values = rowData.map((val, idx) => {
         if (val && typeof val === 'object') {
             // Support explicit formula injection
             if ('formula' in val && typeof (val as any).formula === 'string') {
@@ -166,6 +166,12 @@ const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) 
                 const formula = `=HYPERLINK("${url}","${text}")`;
                 return { userEnteredValue: { formulaValue: formula } };
             }
+        }
+        // If the value is a URL string in the "Link Of Approved POA" column (index 9), convert to hyperlink formula
+        if (idx === 9 && typeof val === 'string' && /^https?:\/\//i.test(val)) {
+            const url = val.replace(/"/g, '""');
+            const formula = `=HYPERLINK("${url}","PDF LINK")`;
+            return { userEnteredValue: { formulaValue: formula } };
         }
         return { userEnteredValue: { stringValue: String(val ?? '') } };
     });
