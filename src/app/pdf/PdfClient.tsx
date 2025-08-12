@@ -7,7 +7,7 @@ import html2canvas from "html2canvas";
 
 export default function PdfClient() {
     const searchParams = useSearchParams();
-    const htmlString = decodeURIComponent(searchParams.get("html") || "");
+    const htmlString = searchParams.get("html") || "";
     const contentRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
