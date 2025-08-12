@@ -287,18 +287,23 @@ const Home: React.FC = () => {
     setIsHeldDialogOpen(true);
     if (!gapi) return;
     setIsLoadingHeldPreview(true);
-    gapi.client.gmail.users.messages
-      .get({ userId: 'me', id: task.id })
-      .then(({ result }: any) => {
-        const html = getEmailBodyHtml(result.payload);
-        setHeldPreviewHtml(html || null);
-        setHeldPreviewSnippet(result.snippet || null);
-      })
-      .catch(() => {
+
+    gapi.client.gmail.users.messages.get({ userId: 'me', id: task.id }).then(
+      ({ result }: any) => {
+        try {
+          const html = getEmailBodyHtml(result.payload);
+          setHeldPreviewHtml(html || null);
+          setHeldPreviewSnippet(result.snippet || null);
+        } finally {
+          setIsLoadingHeldPreview(false);
+        }
+      },
+      () => {
         setHeldPreviewHtml(null);
         setHeldPreviewSnippet('Failed to load email content.');
-      })
-      .finally(() => setIsLoadingHeldPreview(false));
+        setIsLoadingHeldPreview(false);
+      }
+    );
   };
 
   const submitHeldDates = async (e: React.FormEvent) => {
