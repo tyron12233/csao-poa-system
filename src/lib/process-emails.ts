@@ -16,8 +16,8 @@ interface ActivityDetails {
 export interface UserProfile { email: string; name: string; picture: string; }
 export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'uploading_pdf' | 'building_request' | 'writing' | 'done' | 'skipped' | 'held' | 'error';
 export interface EmailTask { id: string; subject: string; status: EmailTaskStatus; error?: string; }
-export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, monthSheetNames: string[], rowData: any[] } };
-export type ParsedHeldResult = { status: 'held', messageId: string, subject: string, reason: string, parsedData: any };
+export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, monthSheetNames: string[], rowData: any[], date: string | null } };
+export type ParsedHeldResult = { status: 'held', messageId: string, subject: string, reason: string, parsedData: any, date: string | null };
 export type ParsedResult = ParsedSuccessResult | ParsedHeldResult | { status: 'error', messageId: string, error: string };
 
 // --- Config ---
@@ -118,7 +118,7 @@ function parseActivityDetailsFromHtml(htmlBody: string): Partial<ActivityDetails
 
 
 
-const parseEmailBody = (htmlBody: string) => {
+const parseEmailBody = (htmlBody: string): Partial<ActivityDetails> => {
     const details = parseActivityDetailsFromHtml(htmlBody);
     return {
         title: details.title || 'Not Found',
@@ -133,7 +133,7 @@ const parseEmailBody = (htmlBody: string) => {
 };
 
 // Date parsing without academic year inference (no remapping of years).
-const parseDateNoInference = (dateString: string): Date | null => {
+const parseDateNoInference = (dateString: string | undefined): Date | null => {
     if (!dateString || dateString === 'Not Found') return null;
     const d = new Date(dateString);
     if (isNaN(d.getTime())) return null;
@@ -149,6 +149,311 @@ const getMonthsBetweenDates = (start: Date, end: Date): Date[] => {
 
 const formatMonthYear = (date: Date): string =>
     date.toLocaleString('en-US', { month: 'long', year: 'numeric' }).replace(' ', ' - ');
+
+// ===================== POA HTML -> PdfClient props parser =====================
+export type ApprovalEntry = { action: string; email: string };
+export type ProgramFlowItem = { time: string; activity: string; inCharge: string };
+export type InvitationLink = { label: string; url: string };
+export interface POAEmailProps {
+    requestNumber: string | number;
+    requestUrl: string;
+    requestDate: string;
+    headerTitle: string;
+    statusLabel: string;
+    approvalHistory: ApprovalEntry[];
+    requestorEmail: string;
+    emailAddress: string;
+    organizationName: string;
+    activityTitle: string;
+    startDate: string;
+    endDate: string;
+    implementationTime: string;
+    targetParticipants: string;
+    targetNumberOfParticipants: string | number;
+    estimatedActivityCost: string;
+    unsdg: string;
+    rationale: string;
+    objectives: string[];
+    mechanics: string[];
+    speakers: string | string[];
+    programFlow: ProgramFlowItem[];
+    budgetBreakdown: string;
+    budgetCharging: string;
+    participants: string[];
+    invitationLinks: InvitationLink[];
+    implementationType: string;
+    venue: string;
+    preparedBy: string;
+    fbName: string;
+    position: string;
+    adminEmail: string;
+}
+
+const clean = (s: string | null | undefined) => (s || "").replace(/\s+/g, " ").trim();
+const stripEnumerator = (s: string) => s.replace(/^\s*\d+\.?\s*/, '').trim();
+
+function splitCellByBreaks(cell: Element): string[] {
+    const html = (cell as any).innerHTML as string || '';
+    return html
+        .split(/<br\s*\/?>(?:\s*)/i)
+        .map(part => clean(part.replace(/<[^>]+>/g, '')))
+        .filter(Boolean);
+}
+
+function parseHeaderMeta(doc: Document): { requestUrl: string; requestNumber: string; requestDate: string; headerTitle: string; statusLabel: string } {
+    const contentWrap = doc.querySelector('td.content-wrap') as Element | null;
+    let requestUrl = '';
+    let requestNumber = '';
+    let requestDate = '';
+    if (contentWrap) {
+        const a = contentWrap.querySelector('a[href]') as Element | null;
+        if (a) {
+            requestUrl = (a.getAttribute('href') || '');
+            requestNumber = clean(a.textContent || '').replace(/^#/, '');
+        }
+        const topText = clean((contentWrap.textContent || '').split('\n')[0] || '');
+        const m = topText.match(/#\d+\s*\|\s*(.+)$/);
+        if (m) requestDate = clean(m[1]);
+    }
+    const headerTitle = clean((doc.querySelector('#title') as Element | null)?.textContent || '');
+
+    // Prefer the bold word in the sentence "The request is now <strong>Complete</strong>."
+    const statusStrong = doc.querySelector('.content-wrap p strong') as Element | null;
+    const statusLabel = clean(statusStrong?.textContent || '');
+
+    return { requestUrl, requestNumber, requestDate, headerTitle, statusLabel };
+}
+
+function parseApprovalHistory(doc: Document): ApprovalEntry[] {
+    const list: ApprovalEntry[] = [];
+    const rows = Array.from(doc.querySelectorAll('.approval-history table tbody tr')) as Element[];
+    rows.forEach(row => {
+        const span = row.querySelector('span');
+        const a = row.querySelector('a.no-link');
+        const action = clean(span?.textContent || '');
+        const email = clean(a?.textContent || '');
+        if (action && email) list.push({ action, email });
+    });
+    return list;
+}
+
+function parseLabelFromCell(cell: Element): string {
+    return clean(cell.textContent || '').replace(/:+\s*$/, ':');
+}
+
+function parseProgramFlow(lines: string[], participants: string[]): ProgramFlowItem[] {
+    const items: ProgramFlowItem[] = [];
+    const timeRe = /^\s*(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})\s*(.*)$/i;
+
+    // Sort participants by length desc for best suffix match
+    const participantsSorted = [...participants].sort((a, b) => b.length - a.length).map(p => p.toLowerCase());
+
+    for (const raw of lines) {
+        const line = clean(raw);
+        if (!line) continue;
+        if (/^time\b/i.test(line)) continue; // skip header line if present
+        const m = line.match(timeRe);
+        if (!m) { items.push({ time: '', activity: line, inCharge: '' }); continue; }
+        const time = clean(m[1]);
+        let rest = clean(m[2]);
+        let inCharge = '';
+        // Try to find a participant name at the end
+        const lower = rest.toLowerCase();
+        const found = participantsSorted.find(p => lower.endsWith(p));
+        if (found) {
+            inCharge = participants.find(p => p.toLowerCase() === found) || '';
+            rest = clean(rest.slice(0, rest.length - found.length));
+        } else {
+            // Fallback: split by 2+ spaces (if preserved) or last '  ' sequence
+            const bySpaces = rest.split(/\s{2,}/);
+            if (bySpaces.length >= 2) {
+                inCharge = clean(bySpaces.pop() || '');
+                rest = clean(bySpaces.join(' '));
+            }
+        }
+        items.push({ time, activity: rest, inCharge });
+    }
+    return items;
+}
+
+export function parsePOAEmailHtmlToProps(htmlBody: string): POAEmailProps {
+    const doc = Document.parseHTMLUnsafe(htmlBody);
+
+    const header = parseHeaderMeta(doc);
+    const approvalHistory = parseApprovalHistory(doc);
+
+    const props: POAEmailProps = {
+        requestNumber: header.requestNumber,
+        requestUrl: header.requestUrl,
+        requestDate: header.requestDate,
+        headerTitle: header.headerTitle,
+        statusLabel: header.statusLabel || 'Complete',
+        approvalHistory,
+        requestorEmail: '',
+        emailAddress: '',
+        organizationName: '',
+        activityTitle: '',
+        startDate: '',
+        endDate: '',
+        implementationTime: '',
+        targetParticipants: '',
+        targetNumberOfParticipants: '',
+        estimatedActivityCost: '',
+        unsdg: '',
+        rationale: '',
+        objectives: [],
+        mechanics: [],
+        speakers: '',
+        programFlow: [],
+        budgetBreakdown: '',
+        budgetCharging: '',
+        participants: [],
+        invitationLinks: [],
+        implementationType: '',
+        venue: '',
+        preparedBy: '',
+        fbName: '',
+        position: '',
+        adminEmail: '',
+    };
+
+    // Footer admin email
+    const adminLink = doc.querySelector('#footer a[href^="mailto:"]') as Element | null;
+    if (adminLink) props.adminEmail = clean((adminLink.getAttribute('href') || '').replace(/^mailto:/, '')) || clean(adminLink.textContent || '');
+
+    const rows = Array.from(doc.querySelectorAll('#responses .response-items tr')) as Element[];
+    // First pass to collect participants, which helps program flow parsing
+    let participants: string[] = [];
+
+    rows.forEach(row => {
+        const tds = Array.from(row.querySelectorAll('td')) as Element[];
+        if (tds.length < 2) return;
+        const label = parseLabelFromCell(tds[0]);
+        const valueCell = tds[1];
+
+        const anchors = Array.from(valueCell.querySelectorAll('a')) as Element[];
+        const valueText = clean(valueCell.textContent || '');
+
+        switch (label) {
+            case 'Requestor:': {
+                const mail = anchors[0]?.getAttribute('href') || '';
+                props.requestorEmail = clean(mail.replace(/^mailto:/, '')) || valueText;
+                break;
+            }
+            case 'E-mail Address:': {
+                const mail = anchors[0]?.getAttribute('href') || '';
+                props.emailAddress = clean(mail.replace(/^mailto:/, '')) || valueText;
+                break;
+            }
+            case 'Name of Organization:': props.organizationName = valueText; break;
+            case 'Title of Activity:': props.activityTitle = valueText; break;
+            case 'Start Date of Implementation:': props.startDate = valueText; break;
+            case 'End Date of Implementation:': props.endDate = valueText; break;
+            case 'Time of Implementation:': props.implementationTime = valueText; break;
+            case 'Target Participants:': props.targetParticipants = valueText; break;
+            case 'Target Number of Participants:': props.targetNumberOfParticipants = (/^\d+$/.test(valueText) ? Number(valueText) : valueText); break;
+            case 'Estimated Activity Cost:': props.estimatedActivityCost = valueText; break;
+            case 'UNSDG:': props.unsdg = valueText; break;
+            case 'Rationale/Brief Description:': props.rationale = valueText; break;
+            case 'Objectives:': props.objectives = splitCellByBreaks(valueCell).map(stripEnumerator); break;
+            case 'Mechanics/Guidelines:': props.mechanics = splitCellByBreaks(valueCell).map(stripEnumerator); break;
+            case 'Name of Speakers::': {
+                const list = splitCellByBreaks(valueCell);
+                props.speakers = list.length <= 1 ? (list[0] || '') : list;
+                break;
+            }
+            case 'Program Flow::': {
+                // parse later after participants discovered, but collect raw lines for now
+                const lines = splitCellByBreaks(valueCell);
+                props.programFlow = parseProgramFlow(lines, participants);
+                break;
+            }
+            case 'Budget Breakdown:': props.budgetBreakdown = valueText; break;
+            case 'Budget Charging (CSAO Depository or Student Collection):': props.budgetCharging = valueText; break;
+            case 'List of Facilitators and Participants:': {
+                participants = splitCellByBreaks(valueCell);
+                props.participants = participants;
+                break;
+            }
+            case 'Letter of Invitation (If any) Sample Design/PubMaterial/Sample Video:': {
+                const links: InvitationLink[] = [];
+                anchors.forEach((a, idx) => {
+                    const url = a.getAttribute('href') || '';
+                    const label = clean(a.textContent || '') || `File Upload ${idx + 1}`;
+                    if (url) links.push({ label, url });
+                });
+                props.invitationLinks = links;
+                break;
+            }
+            case 'Type of Implementation (Online -Social Media Posting; Google Meet; Zoom etc)/Face to Face:': props.implementationType = valueText; break;
+            case 'Venue/Platform:': props.venue = valueText; break;
+            case 'Prepared by::': props.preparedBy = valueText; break;
+            case 'FBName:': props.fbName = valueText; break;
+            case 'Position/Designation:': props.position = valueText; break;
+            default: break;
+        }
+    });
+
+    // If programFlow parsed before participants, re-parse if empty
+    if (!props.programFlow.length) {
+        const programRow = rows.find(r => /Program Flow::/i.test(clean(r.querySelector('td')?.textContent || '')));
+        if (programRow) {
+            const v = (programRow.querySelectorAll('td') as any)[1] as Element;
+            const lines = splitCellByBreaks(v);
+            props.programFlow = parseProgramFlow(lines, props.participants);
+        }
+    }
+
+    return props;
+}
+
+export function buildPdfSearchParams(props: POAEmailProps): URLSearchParams {
+    const params = new URLSearchParams();
+    const set = (k: string, v: string) => { if (v !== undefined && v !== null) params.set(k, v); };
+
+    set('requestNumber', String(props.requestNumber ?? ''));
+    set('requestUrl', props.requestUrl || '');
+    set('requestDate', props.requestDate || '');
+    set('headerTitle', props.headerTitle || '');
+    set('statusLabel', props.statusLabel || '');
+
+    set('approvalHistory', JSON.stringify(props.approvalHistory || []));
+    set('requestorEmail', props.requestorEmail || '');
+    set('emailAddress', props.emailAddress || '');
+    set('organizationName', props.organizationName || '');
+    set('activityTitle', props.activityTitle || '');
+    set('startDate', props.startDate || '');
+    set('endDate', props.endDate || '');
+    set('implementationTime', props.implementationTime || '');
+    set('targetParticipants', props.targetParticipants || '');
+    set('targetNumberOfParticipants', String(props.targetNumberOfParticipants ?? ''));
+    set('estimatedActivityCost', props.estimatedActivityCost || '');
+    set('unsdg', props.unsdg || '');
+    set('rationale', props.rationale || '');
+    set('objectives', JSON.stringify(props.objectives || []));
+    set('mechanics', JSON.stringify(props.mechanics || []));
+    set('speakers', JSON.stringify(props.speakers as any));
+    set('programFlow', JSON.stringify(props.programFlow || []));
+    set('budgetBreakdown', props.budgetBreakdown || '');
+    set('budgetCharging', props.budgetCharging || '');
+    set('participants', JSON.stringify(props.participants || []));
+    set('invitationLinks', JSON.stringify(props.invitationLinks || []));
+    set('implementationType', props.implementationType || '');
+    set('venue', props.venue || '');
+    set('preparedBy', props.preparedBy || '');
+    set('fbName', props.fbName || '');
+    set('position', props.position || '');
+    set('adminEmail', props.adminEmail || '');
+
+    return params;
+}
+
+export function buildPdfUrl(baseUrl: string, props: POAEmailProps): string {
+    const url = new URL(baseUrl);
+    const params = buildPdfSearchParams(props);
+    params.forEach((v, k) => url.searchParams.set(k, v));
+    return url.toString();
+}
 
 // --- Sheets helpers ---
 const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) => {
@@ -196,8 +501,12 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
             cell: {
                 userEnteredFormat: {
                     backgroundColorStyle: { rgbColor: { red: 0.259, green: 0.522, blue: 0.957 } },
-                    textFormat: { foregroundColorStyle: { rgbColor: { red: 1.0, green: 1.0, blue: 1.0 } }, bold: true },
-                    horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE',
+                    textFormat: {
+                        foregroundColorStyle: { rgbColor: { red: 1.0, green: 1.0, blue: 1.0 } },
+                        bold: true
+                    },
+                    horizontalAlignment: 'CENTER',
+                    verticalAlignment: 'MIDDLE',
                 }
             },
             fields: 'userEnteredFormat(backgroundColorStyle,textFormat,horizontalAlignment,verticalAlignment)'
@@ -214,7 +523,7 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
     const setHeaderDataRequest = {
         updateCells: {
             start: { sheetId, rowIndex: 0, columnIndex: 0 },
-            rows: [{ values: headers.map(val => ({ userEnteredValue: { stringValue: val } })) }],
+            rows: [{ values: headers.map((val: string) => ({ userEnteredValue: { stringValue: val } })) }],
             fields: 'userEnteredValue'
         }
     };
@@ -233,11 +542,20 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 };
 
 // --- Email parsing ---
-async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callbacks, uploadFolderId: string | undefined, acadYearStartYear: number, acadYearStartMonth: number): Promise<ParsedResult> {
+async function fetchAndParseEmail(
+    gapi: any,
+    messageId: string,
+    callbacks: Callbacks,
+    uploadFolderId: string | undefined,
+    acadYearStartYear: number,
+    acadYearStartMonth: number
+): Promise<ParsedResult> {
     try {
 
         callbacks.updateTask(messageId, { status: 'fetching' });
         const { result } = await gapi.client.gmail.users.messages.get({ userId: 'me', id: messageId });
+        const date = result.payload.headers.find((h: any) => h.name.toLowerCase() === 'date')?.value || null;
+
         const subject = result.payload.headers.find((h: any) => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
         callbacks.updateTask(messageId, { subject, status: 'parsing' });
 
@@ -246,21 +564,27 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
 
         const parsedData = parseEmailBody(htmlBody);
 
+        if (!parsedData.organization || !parsedData.title) {
+            callbacks.updateTask(messageId, { status: 'error', error: 'Missing organization or title in email body.' });
+            return { status: 'error', messageId, error: 'Missing organization or title in email body.' };
+        }
+
         // Disable academic year inference: strictly parse dates; if invalid/missing, hold the task.
         const startDate = parseDateNoInference(parsedData.startDate);
         const endDate = parseDateNoInference(parsedData.endDate);
         if (!startDate || !endDate) {
             const missing = [!startDate ? 'Start Date' : null, !endDate ? 'End Date' : null].filter(Boolean).join(' & ');
             callbacks.updateTask(messageId, { status: 'held', error: `${missing || 'Dates'} need review` });
-            return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData };
+            return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData, date };
         }
 
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
 
         // add the html body as string (url encoded)
-        const baseLink = `https://csao-poa.vercel.app/pdf?html=`
-        const pdfLink = baseLink + encodeURIComponent(htmlBody);
+        const baseLink = `https://csao-poa.vercel.app/pdf`
+        const props = parsePOAEmailHtmlToProps(htmlBody);
+        const pdfLink = buildPdfUrl(baseLink, props)
         const rowData = [
             'UNSET',
             parsedData.organization,
@@ -275,7 +599,7 @@ async function fetchAndParseEmail(gapi: any, messageId: string, callbacks: Callb
             ''
         ];
 
-        return { status: 'success', data: { messageId, subject, parsedData, monthSheetNames, rowData } };
+        return { status: 'success', data: { messageId, subject, parsedData, monthSheetNames, rowData, date } };
     } catch (err: any) {
         const errorMessage = err.result?.error?.message || err.message || 'Unknown parsing error.';
         callbacks.updateTask(messageId, { status: 'error', error: errorMessage });
@@ -357,9 +681,12 @@ export type ProcessEmailsParams = {
 export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
     const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, academicYearStartMonth, academicYearStartYear, manualStartDate, callbacks } = params;
 
+    console.log(`Starting email processing for sender: ${senderEmail}, spreadsheetId: ${spreadsheetId}, uploadFolderId: ${uploadFolderId}`);
     // --- Phase 1: Fetch emails ---
     let gmailQuery = `from:${senderEmail} "POA" "The request is now complete."`;
     const processedIds = new Set<string>();
+
+    console.log(`Processing emails from ${senderEmail}... Manual start date: ${manualStartDate || 'None'} useDateFilter: ${useDateFilter}`);
 
     if (manualStartDate) {
         // Manual start date takes precedence; convert to unix timestamp (start of day)
@@ -382,9 +709,12 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
                     return latest;
                 }, null as Date | null);
                 if (latestTimestamp) {
+                    console.log(`Latest log timestamp: ${latestTimestamp.toLocaleString()}`);
                     const unixTimestamp = Math.floor(latestTimestamp.getTime() / 1000);
                     gmailQuery += ` after:${unixTimestamp}`;
                     callbacks.status(`Optimized: Fetching only emails after ${latestTimestamp.toLocaleString()}...`);
+
+                    console.log(`Gmail query: ${gmailQuery}`);
                 }
             }
             logRows.forEach(row => { if (row && row[1]) processedIds.add(row[1]); });
@@ -417,6 +747,9 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         callbacks.status('No new emails to process.');
         return { processed: 0 };
     }
+
+    // Process from oldest to newest: Gmail returns most recent first, so reverse
+    allMessages.reverse();
 
     // Queue all tasks initially
     callbacks.queue(allMessages.map((msg: any) => ({ id: msg.id!, subject: 'In queue...', status: 'queued' })));
@@ -510,8 +843,8 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         }
 
         const logRows = [
-            ...successfulResults.map(res => [new Date().toISOString(), res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]),
-            ...heldResults.map(res => [new Date().toISOString(), res.messageId, 'Held (dates needed)', res.parsedData.organization, res.parsedData.title])
+            ...successfulResults.map(res => [res.data.date, res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]),
+            ...heldResults.map(res => [res.date, res.messageId, 'Held (dates needed)', res.parsedData.organization, res.parsedData.title])
         ];
         if (logRows.length > 0) {
             await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: LOG_SHEET_NAME, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
@@ -590,8 +923,11 @@ export async function reprocessHeldEmailWithDates(
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
         // Build PDF link (same as batch processor)
-        const baseLink = `https://csao-poa.vercel.app/pdf?html=`;
-        const pdfLink = baseLink + encodeURIComponent(htmlBody);
+        const baseLink = `https://csao-poa.vercel.app/pdf`;
+
+
+        const pdfProps = parsePOAEmailHtmlToProps(htmlBody);
+        const pdfLink = buildPdfUrl(baseLink, pdfProps);
 
         const rowData = [
             'UNSET',

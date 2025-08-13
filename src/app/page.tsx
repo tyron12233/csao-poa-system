@@ -29,6 +29,7 @@ const POA_EMAIL_SENDER = 'csao.poa@dlsl.edu.ph';
 const TOKEN_STORAGE_KEY = 'poa_google_auth_v1';
 interface StoredAuth {
   accessToken: string;
+  refreshToken: string | null;
   expiresAt: number; // epoch ms
   user: UserProfile;
 }
@@ -170,6 +171,7 @@ const Home: React.FC = () => {
         accessToken: res.access_token,
         user: profile,
         expiresAt: Date.now() + expiresInSec * 1000,
+        refreshToken: res.refresh_token || null,  // store refresh token if available
       };
       try {
         localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(stored));
@@ -428,26 +430,6 @@ const Home: React.FC = () => {
     setStatusMessage(`Selected: ${name}`);
   };
 
-  const openFolderDialog = async () => {
-    if (!gapi || !accessToken) return;
-    setIsFolderDialogOpen(true);
-    setFolderError(null);
-    setIsLoadingFolders(true);
-    try {
-      const resp: any = await gapi.client.drive.files.list({
-        q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
-        orderBy: 'modifiedTime desc',
-        pageSize: 100,
-        fields: 'files(id,name,modifiedTime)'
-      });
-      setDriveFolders(resp.result?.files || []);
-    } catch (e: any) {
-      setFolderError(e.result?.error?.message || 'Failed to load folders.');
-    } finally {
-      setIsLoadingFolders(false);
-    }
-  };
-
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFolderName.trim()) return;
@@ -528,6 +510,16 @@ const Home: React.FC = () => {
                     <p className="font-medium text-gray-900 truncate" title={sheetTitle}>{sheetTitle || 'Untitled Sheet'}</p>
                   </div>
                   <div className="flex gap-2">
+
+                    {spreadsheetId && (
+                      <Button
+                        type="button"
+                        onClick={() => window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank', 'noopener,noreferrer')}
+                      >
+                        Open Sheet
+                      </Button>
+                    )}
+
                     <Button type="button" onClick={() => { setEditingSheet(true); setShowSheetPicker(false); }}>Change</Button>
                   </div>
                 </div>
@@ -581,20 +573,6 @@ const Home: React.FC = () => {
                   (Only fetch newer emails)
                 </span>
               </label>
-            </div>
-
-            <div className="bg-gray-100 rounded-2xl p-4 space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-gray-700">Upload PDF Folder (optional)</p>
-                  {uploadFolderId ? (
-                    <p className="text-xs text-green-700 truncate">{uploadFolderName} (set)</p>
-                  ) : (
-                    <p className="text-xs text-gray-500">No folder selected. PDFs will be skipped.</p>
-                  )}
-                </div>
-                <Button type="button" onClick={openFolderDialog} disabled={!accessToken}>Select</Button>
-              </div>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-3 bg-gray-100 rounded-2xl p-4">
@@ -691,6 +669,7 @@ const Home: React.FC = () => {
                         task={task}
                         compact
                         onClick={
+
                           task.status === 'error'
                             ? () => openErrorDetails(task)
                             : task.status === 'held'
