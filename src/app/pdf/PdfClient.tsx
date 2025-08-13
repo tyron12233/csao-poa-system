@@ -6,7 +6,7 @@ import POAEmail, { buildPOAEmailHtml, POAEmailProps } from "./poa";
 
 export default function PdfClient() {
     const searchParams = useSearchParams();
-    const contentRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLIFrameElement>(null);
 
     const props: POAEmailProps = {
         requestNumber: searchParams.get("requestNumber") || "",
@@ -48,7 +48,9 @@ export default function PdfClient() {
     useEffect(() => {
         // We need a slight delay to ensure all content is rendered before printing.
         const timer = setTimeout(() => {
-            window.print();
+            if (contentRef.current) {
+                contentRef.current.contentWindow?.print();
+            }
         }, 500);
 
         return () => clearTimeout(timer);
@@ -56,6 +58,7 @@ export default function PdfClient() {
 
     return (
         <iframe
+            ref={contentRef}
             style={{ width: "100%", height: "100vh", border: "none" }}
             srcDoc={html}
         />
