@@ -4,6 +4,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
 import { processEmails as runProcessEmails, reprocessHeldEmailWithDates } from '../lib/process-emails';
 import type { EmailTask, EmailTaskStatus } from '../lib/process-emails';
+import { FORM_TYPE_OPTIONS, formTypeShortLabel } from '../lib/form-types';
+import type { FormTypeId } from '../lib/form-types';
 
 // Import reusable UI components
 import { Button } from './ui/button';
@@ -27,6 +29,20 @@ const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY!;
 const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.metadata.readonly';
 const POA_EMAIL_SENDER = 'csao.poa@dlsl.edu.ph';
 const TOKEN_STORAGE_KEY = 'poa_google_auth_v1';
+// Each form type writes to its own spreadsheet; remember the last one picked per type.
+const SHEET_MEMORY_KEY = 'poa_sheet_by_type_v1';
+type SheetMemory = { formType?: FormTypeId; sheets: Partial<Record<FormTypeId, { id: string; name: string }>> };
+const readSheetMemory = (): SheetMemory => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SHEET_MEMORY_KEY) || '');
+    return { formType: parsed.formType, sheets: parsed.sheets || {} };
+  } catch {
+    return { sheets: {} };
+  }
+};
+const writeSheetMemory = (memory: SheetMemory) => {
+  try { localStorage.setItem(SHEET_MEMORY_KEY, JSON.stringify(memory)); } catch (_) { }
+};
 interface StoredAuth {
   accessToken: string;
   refreshToken: string | null;
@@ -48,6 +64,7 @@ const Home: React.FC = () => {
   const [tasks, setTasks] = useState<EmailTask[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [formType, setFormType] = useState<FormTypeId>('poa');
   const [spreadsheetId, setSpreadsheetId] = useState('');
   const [spreadsheetInput, setSpreadsheetInput] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
@@ -85,6 +102,32 @@ const Home: React.FC = () => {
   const [heldPreviewSnippet, setHeldPreviewSnippet] = useState<string | null>(null);
   // Tasks filter state
   const [statusFilter, setStatusFilter] = useState<EmailTaskStatus | null>(null);
+
+  // Switch form type and restore the spreadsheet last used for it
+  const applyFormType = useCallback((type: FormTypeId) => {
+    const memory = readSheetMemory();
+    writeSheetMemory({ ...memory, formType: type });
+    setFormType(type);
+    setTasks([]);
+    setStatusFilter(null);
+    setStatusMessage('');
+    setError(null);
+    setShowSheetPicker(false);
+    const saved = memory.sheets[type];
+    setSpreadsheetId(saved?.id || '');
+    setSpreadsheetInput(saved?.name || '');
+    setSheetTitle(saved?.name || '');
+    setEditingSheet(!saved);
+  }, []);
+
+  const rememberSheet = (id: string, name: string) => {
+    const memory = readSheetMemory();
+    writeSheetMemory({ ...memory, sheets: { ...memory.sheets, [formType]: { id, name } } });
+  };
+
+  useEffect(() => {
+    applyFormType(readSheetMemory().formType || 'poa');
+  }, [applyFormType]);
 
   // Load cached token/user on first mount
   useEffect(() => {
@@ -211,6 +254,7 @@ const Home: React.FC = () => {
         academicYearStartMonth: acadStartMonth,
         academicYearStartYear: acadStartYear,
         manualStartDate: manualStartDate || undefined,
+        formType,
         callbacks: {
           status: (msg: string) => setStatusMessage(msg),
           queue: (newTasks: EmailTask[]) => setTasks(newTasks),
@@ -227,7 +271,7 @@ const Home: React.FC = () => {
     } finally {
       setIsProcessing(false);
     }
-  }, [spreadsheetId, useDateFilter]);
+  }, [spreadsheetId, useDateFilter, uploadFolderId, acadStartMonth, acadStartYear, manualStartDate, formType]);
 
   // --- Error details helpers ---
   const decodeBase64Url = (encoded: string): string => {
@@ -391,6 +435,7 @@ const Home: React.FC = () => {
       const title = resp.result?.properties?.title || '';
       setSheetTitle(title);
       setEditingSheet(false);
+      rememberSheet(id, title || id);
       setStatusMessage('Ready to process.');
     } catch (e: any) {
       setSheetTitle('');
@@ -427,6 +472,7 @@ const Home: React.FC = () => {
     setShowSheetPicker(false);
     setSheetTitle(name);
     setEditingSheet(false);
+    rememberSheet(id, name);
     setStatusMessage(`Selected: ${name}`);
   };
 
@@ -461,7 +507,7 @@ const Home: React.FC = () => {
       <Card>
         <div className="flex justify-between items-start">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">POA Processor</h1>
+            <h1 className="text-2xl font-bold text-gray-900">{formTypeShortLabel(formType)} Processor</h1>
             <p className="text-gray-500">to Google Sheets</p>
           </div>
           {user && <UserProfile user={user} onLogout={handleLogout} />}
@@ -476,8 +522,30 @@ const Home: React.FC = () => {
         ) : (
           <div className="mt-8 space-y-6">
             <div>
+              <label htmlFor="formType" className="block font-semibold text-gray-800 mb-2">
+                Form Type
+              </label>
+              <select
+                id="formType"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
+                value={formType}
+                onChange={(e) => applyFormType(e.target.value as FormTypeId)}
+                disabled={isProcessing}
+              >
+                {FORM_TYPE_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id}>{o.label}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">
+                {formType === 'poa'
+                  ? 'Rows are written to monthly tabs based on the activity dates.'
+                  : 'Rows are appended to a single running list in the selected sheet.'}
+              </p>
+            </div>
+
+            <div>
               <label htmlFor="spreadsheetId" className="block font-semibold text-gray-800 mb-2">
-                Target Google Sheet
+                Target Google Sheet ({formTypeShortLabel(formType)})
               </label>
               {editingSheet ? (
                 <>
@@ -607,7 +675,7 @@ const Home: React.FC = () => {
                 disabled={isProcessing || !spreadsheetId}
                 fullWidth
               >
-                {isProcessing ? 'Processing...' : 'Process New Emails'}
+                {isProcessing ? 'Processing...' : `Process New ${formTypeShortLabel(formType)} Emails`}
               </Button>
             </div>
 
@@ -670,7 +738,7 @@ const Home: React.FC = () => {
                         compact
                         onClick={
 
-                          task.status === 'error'
+                          task.status === 'error' || task.status === 'skipped'
                             ? () => openErrorDetails(task)
                             : task.status === 'held'
                               ? () => openHeldDialog(task)

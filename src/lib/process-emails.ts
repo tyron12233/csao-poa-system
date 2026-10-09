@@ -1,5 +1,11 @@
 "use client";
 
+import { ApprovalEntry, buildFormPdfUrl, clean, parseApprovalHistory, parseFormEmail, parseHeaderMeta } from './form-email';
+import { CellValue, detectFormType, FormTypeId, formTypeShortLabel, LIST_FORM_TYPES, ListColumn } from './form-types';
+
+export type { ApprovalEntry } from './form-email';
+export type { FormTypeId } from './form-types';
+
 interface ActivityDetails {
     title: string;
     organization: string;
@@ -16,11 +22,13 @@ interface ActivityDetails {
 export interface UserProfile { email: string; name: string; picture: string; }
 export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'uploading_pdf' | 'building_request' | 'writing' | 'done' | 'skipped' | 'held' | 'error';
 export interface EmailTask { id: string; subject: string; status: EmailTaskStatus; error?: string; }
-export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, monthSheetNames: string[], rowData: any[], date: string | null } };
+export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, sheetNames: string[], rowData: any[], date: string | null } };
 export type ParsedHeldResult = { status: 'held', messageId: string, subject: string, reason: string, parsedData: any, date: string | null };
-export type ParsedResult = ParsedSuccessResult | ParsedHeldResult | { status: 'error', messageId: string, error: string };
+export type ParsedSkippedResult = { status: 'skipped', messageId: string, subject: string, reason: string, headerTitle: string, date: string | null };
+export type ParsedResult = ParsedSuccessResult | ParsedHeldResult | ParsedSkippedResult | { status: 'error', messageId: string, error: string };
 
 // --- Config ---
+const PDF_BASE_URL = 'https://csao-poa.vercel.app';
 const LOG_SHEET_NAME = 'POA Log';
 const MONTHLY_HEADERS = ['Categories', 'Name Of Organization', 'Title Of Activity', 'Description', 'Start Date Of Implementation', 'End Date Of Implementation', 'Time', 'Venue', 'Type Of Activity', 'Link Of Approved POA', 'Narrative Report'];
 const LOG_HEADERS = ['Timestamp', 'Message ID', 'Status', 'Organization', 'Title'];
@@ -151,7 +159,6 @@ const formatMonthYear = (date: Date): string =>
     date.toLocaleString('en-US', { month: 'long', year: 'numeric' }).replace(' ', ' - ');
 
 // ===================== POA HTML -> PdfClient props parser =====================
-export type ApprovalEntry = { action: string; email: string };
 export type ProgramFlowItem = { time: string; activity: string; inCharge: string };
 export type InvitationLink = { label: string; url: string };
 export interface POAEmailProps {
@@ -189,7 +196,6 @@ export interface POAEmailProps {
     adminEmail: string;
 }
 
-const clean = (s: string | null | undefined) => (s || "").replace(/\s+/g, " ").trim();
 const stripEnumerator = (s: string) => s.replace(/^\s*\d+\.?\s*/, '').trim();
 
 function splitCellByBreaks(cell: Element): string[] {
@@ -198,43 +204,6 @@ function splitCellByBreaks(cell: Element): string[] {
         .split(/<br\s*\/?>(?:\s*)/i)
         .map(part => clean(part.replace(/<[^>]+>/g, '')))
         .filter(Boolean);
-}
-
-function parseHeaderMeta(doc: Document): { requestUrl: string; requestNumber: string; requestDate: string; headerTitle: string; statusLabel: string } {
-    const contentWrap = doc.querySelector('td.content-wrap') as Element | null;
-    let requestUrl = '';
-    let requestNumber = '';
-    let requestDate = '';
-    if (contentWrap) {
-        const a = contentWrap.querySelector('a[href]') as Element | null;
-        if (a) {
-            requestUrl = (a.getAttribute('href') || '');
-            requestNumber = clean(a.textContent || '').replace(/^#/, '');
-        }
-        const topText = clean((contentWrap.textContent || '').split('\n')[0] || '');
-        const m = topText.match(/#\d+\s*\|\s*(.+)$/);
-        if (m) requestDate = clean(m[1]);
-    }
-    const headerTitle = clean((doc.querySelector('#title') as Element | null)?.textContent || '');
-
-    // Prefer the bold word in the sentence "The request is now <strong>Complete</strong>."
-    const statusStrong = doc.querySelector('.content-wrap p strong') as Element | null;
-    const statusLabel = clean(statusStrong?.textContent || '');
-
-    return { requestUrl, requestNumber, requestDate, headerTitle, statusLabel };
-}
-
-function parseApprovalHistory(doc: Document): ApprovalEntry[] {
-    const list: ApprovalEntry[] = [];
-    const rows = Array.from(doc.querySelectorAll('.approval-history table tbody tr')) as Element[];
-    rows.forEach(row => {
-        const span = row.querySelector('span');
-        const a = row.querySelector('a.no-link');
-        const action = clean(span?.textContent || '');
-        const email = clean(a?.textContent || '');
-        if (action && email) list.push({ action, email });
-    });
-    return list;
 }
 
 function parseLabelFromCell(cell: Element): string {
@@ -456,29 +425,33 @@ export function buildPdfUrl(baseUrl: string, props: POAEmailProps): string {
 }
 
 // --- Sheets helpers ---
-const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) => {
-    // Build cell values, supporting formulas and hyperlinks
-    const values = rowData.map((val, idx) => {
-        if (val && typeof val === 'object') {
-            // Support explicit formula injection
-            if ('formula' in val && typeof (val as any).formula === 'string') {
-                return { userEnteredValue: { formulaValue: (val as any).formula } };
-            }
-            // Support hyperlink shorthand: { hyperlink: { url, text? } }
-            if ('hyperlink' in val && (val as any).hyperlink?.url) {
-                const url = String((val as any).hyperlink.url).replace(/"/g, '""');
-                const text = String((val as any).hyperlink.text ?? (val as any).hyperlink.url).replace(/"/g, '""');
-                const formula = `=HYPERLINK("${url}","${text}")`;
-                return { userEnteredValue: { formulaValue: formula } };
-            }
+// Build a cell value, supporting formulas and hyperlinks
+const toCellData = (val: any) => {
+    if (val && typeof val === 'object') {
+        // Support explicit formula injection
+        if ('formula' in val && typeof (val as any).formula === 'string') {
+            return { userEnteredValue: { formulaValue: (val as any).formula } };
         }
+        // Support hyperlink shorthand: { hyperlink: { url, text? } }
+        if ('hyperlink' in val && (val as any).hyperlink?.url) {
+            const url = String((val as any).hyperlink.url).replace(/"/g, '""');
+            const text = String((val as any).hyperlink.text ?? (val as any).hyperlink.url).replace(/"/g, '""');
+            const formula = `=HYPERLINK("${url}","${text}")`;
+            return { userEnteredValue: { formulaValue: formula } };
+        }
+    }
+    return { userEnteredValue: { stringValue: String(val ?? '') } };
+};
+
+const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) => {
+    const values = rowData.map((val, idx) => {
         // If the value is a URL string in the "Link Of Approved POA" column (index 9), convert to hyperlink formula
         if (idx === 9 && typeof val === 'string' && /^https?:\/\//i.test(val)) {
             const url = val.replace(/"/g, '""');
             const formula = `=HYPERLINK("${url}","PDF LINK")`;
             return { userEnteredValue: { formulaValue: formula } };
         }
-        return { userEnteredValue: { stringValue: String(val ?? '') } };
+        return toCellData(val);
     });
 
     const requests: any[] = [
@@ -494,7 +467,21 @@ const generateRowRequests = (sheetId: number, rowIndex: number, rowData: any[]) 
     return requests;
 };
 
-const generateHeaderRequests = (sheetId: number, headers: string[]) => {
+// Rows for the running-list form types (FCA, Pull-out, Sustainability).
+const generateListRowRequests = (sheetId: number, rowIndex: number, rowData: CellValue[], columns: ListColumn[]) => {
+    const requests: any[] = [
+        { updateCells: { start: { sheetId, rowIndex, columnIndex: 0 }, rows: [{ values: rowData.map(toCellData) }], fields: 'userEnteredValue' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: rowIndex, endIndex: rowIndex + 1 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },
+        { repeatCell: { range: { sheetId, startRowIndex: rowIndex, endRowIndex: rowIndex + 1 }, cell: { userEnteredFormat: { horizontalAlignment: 'LEFT', verticalAlignment: 'TOP', wrapStrategy: 'CLIP' } }, fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)' } },
+    ];
+    columns.forEach((col, idx) => {
+        if (!col.wrap) return;
+        requests.push({ repeatCell: { range: { sheetId, startRowIndex: rowIndex, endRowIndex: rowIndex + 1, startColumnIndex: idx, endColumnIndex: idx + 1 }, cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat(wrapStrategy)' } });
+    });
+    return requests;
+};
+
+const generateHeaderRequests = (sheetId: number, headers: string[], widths?: number[]) => {
     const styleRequest = {
         repeatCell: {
             range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
@@ -536,7 +523,9 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
         { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 4, endIndex: 6 }, properties: { pixelSize: 180 }, fields: 'pixelSize' } },
         { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 6, endIndex: 8 }, properties: { pixelSize: 230 }, fields: 'pixelSize' } },
         { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 8, endIndex: 11 }, properties: { pixelSize: 250 }, fields: 'pixelSize' } },
-    ] : [];
+    ] : (widths || []).map((pixelSize, idx) => (
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: idx, endIndex: idx + 1 }, properties: { pixelSize }, fields: 'pixelSize' } }
+    ));
 
     return [setHeaderDataRequest, styleRequest, freezeRowRequest, ...columnWidthRequests];
 };
@@ -545,6 +534,7 @@ const generateHeaderRequests = (sheetId: number, headers: string[]) => {
 async function fetchAndParseEmail(
     gapi: any,
     messageId: string,
+    formType: FormTypeId,
     callbacks: Callbacks,
     uploadFolderId: string | undefined,
     acadYearStartYear: number,
@@ -562,6 +552,22 @@ async function fetchAndParseEmail(
         const htmlBody = getEmailBodyHtml(result.payload);
         if (!htmlBody) throw new Error('HTML body not found.');
 
+        // All forms share sender and subject; the email's title heading decides which form this is.
+        const formEmail = parseFormEmail(htmlBody);
+        const detectedType = detectFormType(formEmail.headerTitle);
+        if (detectedType !== formType) {
+            const reason = `Not a ${formTypeShortLabel(formType)} email (looks like ${formTypeShortLabel(detectedType)})`;
+            callbacks.updateTask(messageId, { status: 'skipped', error: reason });
+            return { status: 'skipped', messageId, subject, reason, headerTitle: formEmail.headerTitle, date };
+        }
+
+        if (formType !== 'poa') {
+            const config = LIST_FORM_TYPES[formType];
+            const pdfLink = buildFormPdfUrl(`${PDF_BASE_URL}/pdf/form`, formEmail);
+            const { row, organization, title } = config.buildRow(formEmail, pdfLink);
+            return { status: 'success', data: { messageId, subject, parsedData: { organization, title }, sheetNames: [config.sheetName], rowData: row, date } };
+        }
+
         const parsedData = parseEmailBody(htmlBody);
 
         if (!parsedData.organization || !parsedData.title) {
@@ -578,11 +584,11 @@ async function fetchAndParseEmail(
             return { status: 'held', messageId, subject, reason: `${missing || 'Dates'} missing or invalid`, parsedData, date };
         }
 
-        const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
+        const sheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
 
         // add the html body as string (url encoded)
-        const baseLink = `https://csao-poa.vercel.app/pdf`
+        const baseLink = `${PDF_BASE_URL}/pdf`
         const props = parsePOAEmailHtmlToProps(htmlBody);
         const pdfLink = buildPdfUrl(baseLink, props)
         const rowData = [
@@ -599,7 +605,7 @@ async function fetchAndParseEmail(
             ''
         ];
 
-        return { status: 'success', data: { messageId, subject, parsedData, monthSheetNames, rowData, date } };
+        return { status: 'success', data: { messageId, subject, parsedData, sheetNames, rowData, date } };
     } catch (err: any) {
         const errorMessage = err.result?.error?.message || err.message || 'Unknown parsing error.';
         callbacks.updateTask(messageId, { status: 'error', error: errorMessage });
@@ -675,15 +681,32 @@ export type ProcessEmailsParams = {
     academicYearStartMonth: number; // 1-12
     academicYearStartYear: number; // e.g. 2025
     manualStartDate?: string; // ISO date (yyyy-mm-dd) to override earliest email fetch
+    formType: FormTypeId;
     callbacks: Callbacks;
 };
 
-export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
-    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, academicYearStartMonth, academicYearStartYear, manualStartDate, callbacks } = params;
+// Quoted A1 sheet reference, safe for names with spaces or punctuation.
+const a1 = (sheetName: string, range?: string) => `'${sheetName.replace(/'/g, "''")}'${range ? `!${range}` : ''}`;
 
-    console.log(`Starting email processing for sender: ${senderEmail}, spreadsheetId: ${spreadsheetId}, uploadFolderId: ${uploadFolderId}`);
+export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
+    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, academicYearStartMonth, academicYearStartYear, manualStartDate, formType, callbacks } = params;
+
+    // POA writes to monthly tabs; the other form types append to one running list.
+    const listConfig = formType === 'poa' ? null : LIST_FORM_TYPES[formType];
+    const logSheetName = listConfig ? listConfig.logSheetName : LOG_SHEET_NAME;
+    const headerRequestsFor = (sheetId: number, title: string) => {
+        if (title === logSheetName) return generateHeaderRequests(sheetId, LOG_HEADERS);
+        if (listConfig) return generateHeaderRequests(sheetId, listConfig.columns.map(c => c.header), listConfig.columns.map(c => c.width));
+        return generateHeaderRequests(sheetId, MONTHLY_HEADERS);
+    };
+    const rowRequestsFor = (sheetId: number, rowIndex: number, row: any[]) =>
+        listConfig ? generateListRowRequests(sheetId, rowIndex, row, listConfig.columns) : generateRowRequests(sheetId, rowIndex, row);
+
+    console.log(`Starting ${formType} email processing for sender: ${senderEmail}, spreadsheetId: ${spreadsheetId}, uploadFolderId: ${uploadFolderId}`);
     // --- Phase 1: Fetch emails ---
-    let gmailQuery = `from:${senderEmail} "POA" "The request is now complete."`;
+    let gmailQuery = listConfig
+        ? `from:${senderEmail} "The request is now complete." "${listConfig.gmailPhrase}"`
+        : `from:${senderEmail} "POA" "The request is now complete."`;
     const processedIds = new Set<string>();
 
     console.log(`Processing emails from ${senderEmail}... Manual start date: ${manualStartDate || 'None'} useDateFilter: ${useDateFilter}`);
@@ -698,7 +721,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         }
     } else if (useDateFilter) {
         try {
-            const logData = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId, range: `${LOG_SHEET_NAME}!A2:B` });
+            const logData = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId, range: a1(logSheetName, 'A2:B') });
             const logRows: any[] = logData.result.values || [];
             if (logRows.length > 0) {
                 const latestTimestamp = logRows.reduce((latest: Date | null, row: any[]) => {
@@ -720,7 +743,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
             logRows.forEach(row => { if (row && row[1]) processedIds.add(row[1]); });
         } catch (e: any) {
             if (e.result?.error?.code === 400) {
-                callbacks.status('POA Log sheet not found. Fetching all emails...');
+                callbacks.status(`${logSheetName} sheet not found. Fetching all emails...`);
             } else {
                 throw e;
             }
@@ -767,10 +790,11 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         const parsedResults: ParsedResult[] = [];
         for (let i = 0; i < batchMessages.length; i += 5) {
             const chunk = batchMessages.slice(i, i + 5);
-            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, callbacks, uploadFolderId, academicYearStartYear, academicYearStartMonth))));
+            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, formType, callbacks, uploadFolderId, academicYearStartYear, academicYearStartMonth))));
         }
         const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
         const heldResults = parsedResults.filter((p): p is ParsedHeldResult => p.status === 'held');
+        const skippedResults = parsedResults.filter((p): p is ParsedSkippedResult => p.status === 'skipped');
         const successfulIds = successfulResults.map(p => p.data.messageId);
         const heldIds = heldResults.map(p => p.messageId);
         callbacks.updateTasksBulk(successfulIds, { status: 'building_request' });
@@ -780,9 +804,9 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
 
         // Pre-compute sheet state for this batch
         const dataBySheet = new Map<string, any[][]>();
-        const neededSheetNames = new Set<string>([LOG_SHEET_NAME]);
+        const neededSheetNames = new Set<string>([logSheetName]);
         for (const result of successfulResults) {
-            for (const sheetName of result.data.monthSheetNames) {
+            for (const sheetName of result.data.sheetNames) {
                 if (!dataBySheet.has(sheetName)) dataBySheet.set(sheetName, []);
                 dataBySheet.get(sheetName)!.push(result.data.rowData);
                 neededSheetNames.add(sheetName);
@@ -803,8 +827,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
             createResult.result.replies?.forEach((reply: any) => {
                 const props = reply.addSheet.properties;
                 existingSheets.set(props.title, { sheetId: props.sheetId });
-                const headers = props.title === LOG_SHEET_NAME ? LOG_HEADERS : MONTHLY_HEADERS;
-                headerRequests.push(...generateHeaderRequests(props.sheetId, headers));
+                headerRequests.push(...headerRequestsFor(props.sheetId, props.title));
             });
 
             if (headerRequests.length > 0) {
@@ -814,11 +837,11 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         }
 
         const sheetState = new Map<string, { sheetId: number, lastRow: number }>();
-        const valueRangesToGet = [...neededSheetNames].filter(name => existingSheets.has(name)).map(name => `${name}!A:A`);
+        const valueRangesToGet = [...neededSheetNames].filter(name => existingSheets.has(name)).map(name => a1(name, 'A:A'));
         if (valueRangesToGet.length > 0) {
             const sheetValues = await gapi.client.sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: valueRangesToGet });
             sheetValues.result.valueRanges?.forEach((rangeResult: any) => {
-                const sheetName = rangeResult.range.split('!')[0].replace(/'/g, '');
+                const sheetName = rangeResult.range.split('!')[0].replace(/^'|'$/g, '').replace(/''/g, "'");
                 const lastRow = rangeResult.values?.length || 0;
                 if (existingSheets.has(sheetName)) {
                     sheetState.set(sheetName, { sheetId: existingSheets.get(sheetName)!.sheetId, lastRow });
@@ -832,7 +855,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
             if (!state) continue;
             masterRequest.push({ appendDimension: { sheetId: state.sheetId, dimension: 'ROWS', length: rows.length } });
             for (let i = 0; i < rows.length; i++) {
-                masterRequest.push(...generateRowRequests(state.sheetId, state.lastRow + i, rows[i]));
+                masterRequest.push(...rowRequestsFor(state.sheetId, state.lastRow + i, rows[i]));
             }
         }
 
@@ -844,21 +867,24 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
 
         const logRows = [
             ...successfulResults.map(res => [res.data.date, res.data.messageId, 'Processed', res.data.parsedData.organization, res.data.parsedData.title]),
-            ...heldResults.map(res => [res.date, res.messageId, 'Held (dates needed)', res.parsedData.organization, res.parsedData.title])
+            ...heldResults.map(res => [res.date, res.messageId, 'Held (dates needed)', res.parsedData.organization, res.parsedData.title]),
+            // Logged so other form types aren't fetched again on the next run.
+            ...skippedResults.map(res => [res.date, res.messageId, `Skipped (${res.reason})`, '', res.headerTitle])
         ];
         if (logRows.length > 0) {
-            await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: LOG_SHEET_NAME, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
+            await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId, range: a1(logSheetName), valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: logRows } });
         }
         callbacks.updateTasksBulk(successfulIds, { status: 'done' });
         totalProcessed += successfulResults.length;
         const heldMsg = heldResults.length ? `, held ${heldResults.length} for date review` : '';
-        callbacks.status(`Batch ${batchIndex + 1} complete. Processed ${successfulResults.length} emails${heldMsg} (Total so far: ${totalProcessed}).`);
+        const skippedMsg = skippedResults.length ? `, skipped ${skippedResults.length} other form type(s)` : '';
+        callbacks.status(`Batch ${batchIndex + 1} complete. Processed ${successfulResults.length} emails${heldMsg}${skippedMsg} (Total so far: ${totalProcessed}).`);
     }
 
     callbacks.status(`Process complete. ${totalProcessed} new emails were successfully processed in ${Math.ceil(allMessages.length / BATCH_SIZE)} batch(es).`);
     // After all batches, summarize any held items and ask user to specify/fix dates.
     try {
-        const logData = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId, range: `${LOG_SHEET_NAME}!A2:E` });
+        const logData = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId, range: a1(logSheetName, 'A2:E') });
         const rows: any[] = logData.result.values || [];
         const heldNow = rows.filter(r => r[2] && String(r[2]).toLowerCase().startsWith('held'));
         if (heldNow.length > 0) {
@@ -923,7 +949,7 @@ export async function reprocessHeldEmailWithDates(
         const monthSheetNames = getMonthsBetweenDates(startDate, endDate).map(formatMonthYear);
 
         // Build PDF link (same as batch processor)
-        const baseLink = `https://csao-poa.vercel.app/pdf`;
+        const baseLink = `${PDF_BASE_URL}/pdf`;
 
 
         const pdfProps = parsePOAEmailHtmlToProps(htmlBody);
