@@ -4,27 +4,35 @@ interface StatusPillProps {
     status: string;
 }
 
-export const StatusPill: React.FC<StatusPillProps> = ({ status }) => {
-    const statusClasses: { [key: string]: string } = {
-        done: 'bg-green-100 text-green-800',
-        error: 'bg-red-100 text-red-800',
-        fetching: 'bg-blue-100 text-blue-800 animate-pulse',
-        parsing: 'bg-yellow-100 text-yellow-800 animate-pulse',
-        uploading_pdf: 'bg-orange-100 text-orange-800 animate-pulse',
-        building_request: 'bg-indigo-100 text-indigo-800',
-        writing: 'bg-purple-100 text-purple-800 animate-pulse',
-        queued: 'bg-gray-200 text-gray-800',
-        skipped: 'bg-gray-300 text-gray-600',
-        held: 'bg-amber-100 text-amber-800',
-    };
+export const STATUS_LABELS: Record<string, string> = {
+    queued: 'Queued',
+    fetching: 'Fetching',
+    parsing: 'Reading',
+    uploading_pdf: 'Uploading',
+    building_request: 'Preparing',
+    writing: 'Writing',
+    done: 'Added',
+    skipped: 'Skipped',
+    held: 'Held',
+    error: 'Error',
+};
 
-    const className = statusClasses[status] || 'bg-gray-200';
+const STATUS_CLASSES: Record<string, string> = {
+    done: 'bg-brand-50 text-brand-700 ring-brand-200',
+    error: 'bg-red-50 text-red-700 ring-red-200',
+    held: 'bg-amber-50 text-amber-800 ring-amber-200',
+    skipped: 'bg-gray-100 text-gray-600 ring-gray-200',
+    queued: 'bg-gray-50 text-gray-500 ring-gray-200',
+};
+
+export const StatusPill: React.FC<StatusPillProps> = ({ status }) => {
+    const inProgress = !(status in STATUS_CLASSES);
+    const className = STATUS_CLASSES[status] || 'bg-sky-50 text-sky-700 ring-sky-200';
 
     return (
-        <span
-            className={`ml-4 px-3 py-1 rounded-full text-xs font-semibold capitalize ${className}`}
-        >
-            {status.replace('_', ' ')}
+        <span className={`inline-flex items-center gap-1.5 shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold ring-1 ring-inset ${className}`}>
+            {inProgress && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />}
+            {STATUS_LABELS[status] || status.replace('_', ' ')}
         </span>
     );
 };

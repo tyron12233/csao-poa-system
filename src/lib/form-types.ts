@@ -21,11 +21,11 @@ export interface ListFormConfig {
     buildRow: (email: FormEmail, pdfUrl: string) => { row: CellValue[]; organization: string; title: string };
 }
 
-export const FORM_TYPE_OPTIONS: { id: FormTypeId; label: string; shortLabel: string }[] = [
-    { id: 'poa', label: 'Program of Activities (POA)', shortLabel: 'POA' },
-    { id: 'fca', label: 'Funds Collection Approval (FCA)', shortLabel: 'FCA' },
-    { id: 'pullout', label: 'Pull-out Form (Class/Students Participation)', shortLabel: 'Pull-out' },
-    { id: 'sustainability', label: 'Sustainability Checklist and Approval Form', shortLabel: 'Sustainability' },
+export const FORM_TYPE_OPTIONS: { id: FormTypeId; label: string; shortLabel: string; hint: string }[] = [
+    { id: 'poa', label: 'Program of Activities (POA)', shortLabel: 'POA', hint: 'Program of Activities' },
+    { id: 'fca', label: 'Funds Collection Approval (FCA)', shortLabel: 'FCA', hint: 'Funds Collection' },
+    { id: 'pullout', label: 'Pull-out Form (Class/Students Participation)', shortLabel: 'Pull-out', hint: 'Class participation' },
+    { id: 'sustainability', label: 'Sustainability Checklist and Approval Form', shortLabel: 'Sustainability', hint: 'Checklist & approval' },
 ];
 
 export const formTypeShortLabel = (id: FormTypeId) => FORM_TYPE_OPTIONS.find(o => o.id === id)!.shortLabel;

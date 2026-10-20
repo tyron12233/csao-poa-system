@@ -1,41 +1,32 @@
-
 import React from 'react';
 import type { EmailTask } from '../../lib/process-emails';
 import { StatusPill } from './status-pill';
+import { Button } from './button';
 
 interface TaskItemProps {
     task: EmailTask;
-    compact?: boolean;
-    onClick?: () => void;
+    action?: { label: string; onClick: () => void };
 }
 
-export const TaskItem: React.FC<TaskItemProps> = ({ task, compact = false, onClick }) => {
-    if (compact) {
-        return (
-            <li
-                title={task.subject}
-                onClick={onClick}
-                className={`group relative flex items-center gap-1 rounded-full px-3 py-1.5 border text-xs md:text-[11px] bg-white shadow-sm max-w-full transition-colors ${task.error ? 'border-red-300' : 'border-gray-200'} ${onClick ? 'cursor-pointer hover:border-blue-400 hover:shadow' : 'hover:border-gray-400'}`}
-            >
-                <span className="font-medium truncate max-w-[10rem] md:max-w-[14rem] text-gray-700">
-                    {task.subject}
-                </span>
-                <StatusPill status={task.status} />
-                {task.error && (
-                    <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1 whitespace-nowrap rounded bg-red-600 text-white px-2 py-1 text-[10px] shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none">
-                        {task.error}
-                    </span>
-                )}
-            </li>
-        );
-    }
+export const TaskItem: React.FC<TaskItemProps> = ({ task, action }) => {
+    // Every form email has the subject "Request #N Complete", so lead with organization and title.
+    const heading = task.organization && task.title
+        ? `${task.organization} — ${task.title}`
+        : task.title || task.organization || task.subject;
+    const meta = [task.requestNumber ? `Request #${task.requestNumber}` : null, task.error].filter(Boolean).join(' · ');
+
     return (
-        <li onClick={onClick} className={`flex justify-between items-center bg-gray-50 p-4 rounded-2xl border ${onClick ? 'cursor-pointer hover:border-blue-400 hover:bg-blue-50' : ''}`}>
-            <div className="flex-1 min-w-0">
-                <p className="font-medium text-gray-800 truncate">{task.subject}</p>
-                {task.error && <p className="text-xs text-red-500 truncate">Error: {task.error}</p>}
+        <li className="flex items-center gap-3 px-3 py-2.5">
+            <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-gray-800 line-clamp-2 sm:line-clamp-1 break-words" title={heading}>{heading}</p>
+                {meta && (
+                    <p className={`text-xs truncate ${task.status === 'error' ? 'text-red-600' : 'text-gray-500'}`} title={meta}>{meta}</p>
+                )}
             </div>
             <StatusPill status={task.status} />
+            {action && (
+                <Button variant="secondary" size="sm" onClick={action.onClick}>{action.label}</Button>
+            )}
         </li>
     );
 };

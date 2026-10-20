@@ -21,7 +21,7 @@ interface ActivityDetails {
 // --- Types ---
 export interface UserProfile { email: string; name: string; picture: string; }
 export type EmailTaskStatus = 'queued' | 'fetching' | 'parsing' | 'uploading_pdf' | 'building_request' | 'writing' | 'done' | 'skipped' | 'held' | 'error';
-export interface EmailTask { id: string; subject: string; status: EmailTaskStatus; error?: string; }
+export interface EmailTask { id: string; subject: string; status: EmailTaskStatus; error?: string; requestNumber?: string; organization?: string; title?: string; }
 export type ParsedSuccessResult = { status: 'success', data: { messageId: string, subject: string, parsedData: any, sheetNames: string[], rowData: any[], date: string | null } };
 export type ParsedHeldResult = { status: 'held', messageId: string, subject: string, reason: string, parsedData: any, date: string | null };
 export type ParsedSkippedResult = { status: 'skipped', messageId: string, subject: string, reason: string, headerTitle: string, date: string | null };
@@ -53,7 +53,7 @@ const decodeBase64Url = (encoded: string): string => {
     }
 };
 
-const getEmailBodyHtml = (payload: any): string => {
+export const getEmailBodyHtml = (payload: any): string => {
     function find(parts: any[]): string | null {
         for (const p of parts) {
             if (p.mimeType === 'text/html' && p.body?.data) return decodeBase64Url(p.body.data);
@@ -535,10 +535,7 @@ async function fetchAndParseEmail(
     gapi: any,
     messageId: string,
     formType: FormTypeId,
-    callbacks: Callbacks,
-    uploadFolderId: string | undefined,
-    acadYearStartYear: number,
-    acadYearStartMonth: number
+    callbacks: Callbacks
 ): Promise<ParsedResult> {
     try {
 
@@ -555,9 +552,10 @@ async function fetchAndParseEmail(
         // All forms share sender and subject; the email's title heading decides which form this is.
         const formEmail = parseFormEmail(htmlBody);
         const detectedType = detectFormType(formEmail.headerTitle);
+        callbacks.updateTask(messageId, { requestNumber: formEmail.requestNumber || undefined });
         if (detectedType !== formType) {
             const reason = `Not a ${formTypeShortLabel(formType)} email (looks like ${formTypeShortLabel(detectedType)})`;
-            callbacks.updateTask(messageId, { status: 'skipped', error: reason });
+            callbacks.updateTask(messageId, { status: 'skipped', error: reason, title: formEmail.headerTitle || undefined });
             return { status: 'skipped', messageId, subject, reason, headerTitle: formEmail.headerTitle, date };
         }
 
@@ -565,10 +563,13 @@ async function fetchAndParseEmail(
             const config = LIST_FORM_TYPES[formType];
             const pdfLink = buildFormPdfUrl(`${PDF_BASE_URL}/pdf/form`, formEmail);
             const { row, organization, title } = config.buildRow(formEmail, pdfLink);
+            callbacks.updateTask(messageId, { organization: organization || undefined, title: title || undefined });
             return { status: 'success', data: { messageId, subject, parsedData: { organization, title }, sheetNames: [config.sheetName], rowData: row, date } };
         }
 
         const parsedData = parseEmailBody(htmlBody);
+        const found = (v?: string) => (v && v !== 'Not Found' ? v : undefined);
+        callbacks.updateTask(messageId, { organization: found(parsedData.organization), title: found(parsedData.title) });
 
         if (!parsedData.organization || !parsedData.title) {
             callbacks.updateTask(messageId, { status: 'error', error: 'Missing organization or title in email body.' });
@@ -678,8 +679,6 @@ export type ProcessEmailsParams = {
     senderEmail: string;
     useDateFilter: boolean;
     uploadFolderId?: string; // target Drive folder for PDFs
-    academicYearStartMonth: number; // 1-12
-    academicYearStartYear: number; // e.g. 2025
     manualStartDate?: string; // ISO date (yyyy-mm-dd) to override earliest email fetch
     formType: FormTypeId;
     callbacks: Callbacks;
@@ -689,7 +688,7 @@ export type ProcessEmailsParams = {
 const a1 = (sheetName: string, range?: string) => `'${sheetName.replace(/'/g, "''")}'${range ? `!${range}` : ''}`;
 
 export async function processEmails(gapi: any, params: ProcessEmailsParams): Promise<{ processed: number }> {
-    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, academicYearStartMonth, academicYearStartYear, manualStartDate, formType, callbacks } = params;
+    const { spreadsheetId, senderEmail, useDateFilter, uploadFolderId, manualStartDate, formType, callbacks } = params;
 
     // POA writes to monthly tabs; the other form types append to one running list.
     const listConfig = formType === 'poa' ? null : LIST_FORM_TYPES[formType];
@@ -790,7 +789,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         const parsedResults: ParsedResult[] = [];
         for (let i = 0; i < batchMessages.length; i += 5) {
             const chunk = batchMessages.slice(i, i + 5);
-            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, formType, callbacks, uploadFolderId, academicYearStartYear, academicYearStartMonth))));
+            parsedResults.push(...await Promise.all(chunk.map((msg: any) => fetchAndParseEmail(gapi, msg.id!, formType, callbacks))));
         }
         const successfulResults = parsedResults.filter((p): p is ParsedSuccessResult => p.status === 'success');
         const heldResults = parsedResults.filter((p): p is ParsedHeldResult => p.status === 'held');

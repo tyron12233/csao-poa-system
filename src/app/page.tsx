@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleOAuthProvider, googleLogout, useGoogleLogin } from '@react-oauth/google';
-import { processEmails as runProcessEmails, reprocessHeldEmailWithDates } from '../lib/process-emails';
+import { processEmails as runProcessEmails, reprocessHeldEmailWithDates, getEmailBodyHtml } from '../lib/process-emails';
 import type { EmailTask, EmailTaskStatus } from '../lib/process-emails';
 import { FORM_TYPE_OPTIONS, formTypeShortLabel } from '../lib/form-types';
 import type { FormTypeId } from '../lib/form-types';
@@ -12,12 +12,12 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Card } from './ui/card';
 import { UserProfile } from './ui/user-profile';
-import { TaskItem } from './ui/task-item';
 import { Modal } from './ui/modal';
+import { RunResults } from './ui/run-results';
 
 let gapi: any = undefined;
 
-interface UserProfile {
+interface GoogleUser {
   email: string;
   name: string;
   picture: string;
@@ -47,8 +47,22 @@ interface StoredAuth {
   accessToken: string;
   refreshToken: string | null;
   expiresAt: number; // epoch ms
-  user: UserProfile;
+  user: GoogleUser;
 }
+
+const SheetIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-9 w-9 shrink-0" aria-hidden="true">
+    <rect x="3" y="2" width="18" height="20" rx="2.5" className="fill-brand-600" />
+    <path d="M7 8h10M7 12h10M7 16h10M11 8v8" className="stroke-white" strokeWidth="1.5" fill="none" />
+  </svg>
+);
+
+const Spinner = () => (
+  <svg viewBox="0 0 24 24" className="h-4 w-4 animate-spin" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" fill="none" />
+    <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" fill="none" strokeLinecap="round" />
+  </svg>
+);
 
 function App() {
   return (
@@ -59,11 +73,12 @@ function App() {
 }
 
 const Home: React.FC = () => {
-  const [user, setUser] = useState<UserProfile | null>(null);
+  const [user, setUser] = useState<GoogleUser | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [tasks, setTasks] = useState<EmailTask[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [hasRun, setHasRun] = useState(false);
   const [formType, setFormType] = useState<FormTypeId>('poa');
   const [spreadsheetId, setSpreadsheetId] = useState('');
   const [spreadsheetInput, setSpreadsheetInput] = useState('');
@@ -75,20 +90,12 @@ const Home: React.FC = () => {
   const [sheetTitle, setSheetTitle] = useState<string>('');
   const [sheetTitleLoading, setSheetTitleLoading] = useState(false);
   const [editingSheet, setEditingSheet] = useState(true);
-  const [uploadFolderId, setUploadFolderId] = useState<string>('');
-  const [uploadFolderName, setUploadFolderName] = useState<string>('');
-  const [isFolderDialogOpen, setIsFolderDialogOpen] = useState(false);
-  const [driveFolders, setDriveFolders] = useState<{ id: string; name: string; modifiedTime?: string }[]>([]);
-  const [isLoadingFolders, setIsLoadingFolders] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [folderError, setFolderError] = useState<string | null>(null);
-  const [acadStartMonth, setAcadStartMonth] = useState<number>(7); // default July
-  const [acadStartYear, setAcadStartYear] = useState<number>(new Date().getFullYear());
   const [manualStartDate, setManualStartDate] = useState<string>('');
   const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  // Error email details modal state
+  // Email details modal state (errors and skipped emails)
   const [isErrorDetailsOpen, setIsErrorDetailsOpen] = useState(false);
   const [isLoadingErrorDetails, setIsLoadingErrorDetails] = useState(false);
+  const [detailsTask, setDetailsTask] = useState<EmailTask | null>(null);
   const [errorEmail, setErrorEmail] = useState<{ subject: string; from?: string; date?: string; html?: string; snippet?: string } | null>(null);
   // Held-date modal state
   const [isHeldDialogOpen, setIsHeldDialogOpen] = useState(false);
@@ -109,6 +116,7 @@ const Home: React.FC = () => {
     writeSheetMemory({ ...memory, formType: type });
     setFormType(type);
     setTasks([]);
+    setHasRun(false);
     setStatusFilter(null);
     setStatusMessage('');
     setError(null);
@@ -164,7 +172,7 @@ const Home: React.FC = () => {
       const refreshIn = Math.max(msUntilExpiry - 60_000, 5_000);
       refreshTimeoutRef.current = setTimeout(() => {
         // We cannot truly refresh silently without a refresh token; notify user.
-        setStatusMessage('Session expiring soon – please click the sign in button to refresh.');
+        setStatusMessage('Session expiring soon – please sign out and sign in again to refresh.');
       }, refreshIn);
     } catch (_) {
       // ignore
@@ -204,7 +212,7 @@ const Home: React.FC = () => {
   const login = useGoogleLogin({
     onSuccess: async (res: any) => {
       setAccessToken(res.access_token);
-      const profile: UserProfile = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      const profile: GoogleUser = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
         headers: { Authorization: `Bearer ${res.access_token}` },
       }).then((r) => r.json());
       setUser(profile);
@@ -232,27 +240,27 @@ const Home: React.FC = () => {
     setUser(null);
     setAccessToken(null);
     setTasks([]);
+    setHasRun(false);
     setError(null);
     try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (_) { }
   };
 
   const handleProcessEmails = useCallback(async () => {
     if (!spreadsheetId) {
-      setError('Please enter a Google Sheet ID.');
+      setError('Please select a Google Sheet first.');
       return;
     }
     setError(null);
-    setStatusMessage('');
+    setStatusMessage('Searching Gmail…');
     setIsProcessing(true);
+    setHasRun(true);
+    setStatusFilter(null);
     setTasks([]);
     try {
       await runProcessEmails(gapi, {
         spreadsheetId,
         senderEmail: POA_EMAIL_SENDER,
         useDateFilter,
-        uploadFolderId: uploadFolderId || undefined,
-        academicYearStartMonth: acadStartMonth,
-        academicYearStartYear: acadStartYear,
         manualStartDate: manualStartDate || undefined,
         formType,
         callbacks: {
@@ -271,40 +279,11 @@ const Home: React.FC = () => {
     } finally {
       setIsProcessing(false);
     }
-  }, [spreadsheetId, useDateFilter, uploadFolderId, acadStartMonth, acadStartYear, manualStartDate, formType]);
-
-  // --- Error details helpers ---
-  const decodeBase64Url = (encoded: string): string => {
-    try {
-      return decodeURIComponent(
-        atob(encoded.replace(/-/g, '+').replace(/_/g, '/'))
-          .split('')
-          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-          .join('')
-      );
-    } catch {
-      return '';
-    }
-  };
-
-  const getEmailBodyHtml = (payload: any): string => {
-    function find(parts: any[]): string | null {
-      for (const p of parts) {
-        if (p.mimeType === 'text/html' && p.body?.data) return decodeBase64Url(p.body.data);
-        if (p.parts) {
-          const n = find(p.parts);
-          if (n) return n;
-        }
-      }
-      return null;
-    }
-    if (payload.mimeType === 'text/html' && payload.body?.data) return decodeBase64Url(payload.body.data);
-    if (payload.parts) return find(payload.parts) || '';
-    return '';
-  };
+  }, [spreadsheetId, useDateFilter, manualStartDate, formType]);
 
   const openErrorDetails = async (task: EmailTask) => {
     if (!gapi) return;
+    setDetailsTask(task);
     setIsErrorDetailsOpen(true);
     setIsLoadingErrorDetails(true);
     setErrorEmail(null);
@@ -381,7 +360,6 @@ const Home: React.FC = () => {
         messageId: heldTask.id,
         manualStartDate: heldStartDate,
         manualEndDate: heldEndDate,
-        uploadFolderId: uploadFolderId || undefined,
         callbacks: {
           status: (msg: string) => setStatusMessage(msg),
           queue: (_tasks: EmailTask[]) => { },
@@ -400,8 +378,6 @@ const Home: React.FC = () => {
     }
   };
 
-  // Simulation handler removed per requirement to remove simulate processing feature.
-
   // Helper: parse spreadsheet ID from either raw ID or full URL
   const extractSpreadsheetId = (val: string): string | null => {
     if (!val) return null;
@@ -419,7 +395,6 @@ const Home: React.FC = () => {
     const id = extractSpreadsheetId(val);
     if (id) {
       setSpreadsheetId(id);
-      setStatusMessage('Found sheet – retrieving details...');
       fetchSheetTitle(id);
     } else {
       setSpreadsheetId('');
@@ -436,10 +411,10 @@ const Home: React.FC = () => {
       setSheetTitle(title);
       setEditingSheet(false);
       rememberSheet(id, title || id);
-      setStatusMessage('Ready to process.');
+      setStatusMessage('');
     } catch (e: any) {
       setSheetTitle('');
-      setStatusMessage('Could not fetch sheet title – ensure you have access.');
+      setStatusMessage('Could not open that sheet – make sure your account has access to it.');
     } finally {
       setSheetTitleLoading(false);
     }
@@ -473,80 +448,80 @@ const Home: React.FC = () => {
     setSheetTitle(name);
     setEditingSheet(false);
     rememberSheet(id, name);
-    setStatusMessage(`Selected: ${name}`);
+    setStatusMessage('');
   };
 
-  const handleCreateFolder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFolderName.trim()) return;
-    try {
-      setFolderError(null);
-      const resp: any = await gapi.client.drive.files.create({
-        resource: { name: newFolderName.trim(), mimeType: 'application/vnd.google-apps.folder' },
-        fields: 'id,name'
-      });
-      const folder = resp.result;
-      setDriveFolders(prev => [folder, ...prev]);
-      setUploadFolderId(folder.id);
-      setUploadFolderName(folder.name);
-      setNewFolderName('');
-    } catch (e: any) {
-      setFolderError(e.result?.error?.message || 'Failed to create folder.');
-    }
-  };
+  const shortLabel = formTypeShortLabel(formType);
+  const sheetUrl = spreadsheetId ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}` : '';
 
-  const selectFolder = (id: string, name: string) => {
-    setUploadFolderId(id);
-    setUploadFolderName(name);
-    setIsFolderDialogOpen(false);
-    setStatusMessage(`Selected upload folder: ${name}`);
+  const taskAction = (task: EmailTask) => {
+    if (task.status === 'held') return { label: 'Set dates', onClick: () => openHeldDialog(task) };
+    if (task.status === 'error' || task.status === 'skipped') return { label: 'View', onClick: () => openErrorDetails(task) };
+    return undefined;
   };
 
   return (
-    <div className="bg-gray-50 min-h-screen flex flex-col items-center justify-center p-4 font-sans">
+    <div className="min-h-screen flex flex-col items-center px-4 py-8 sm:py-14">
       <Card>
-        <div className="flex justify-between items-start">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{formTypeShortLabel(formType)} Processor</h1>
-            <p className="text-gray-500">to Google Sheets</p>
+        <header className="flex justify-between items-center gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="h-10 w-10 shrink-0 rounded-xl bg-brand-600 text-white grid place-items-center font-bold text-[11px] tracking-tight">CSAO</div>
+            <div className="min-w-0">
+              <h1 className="text-lg sm:text-xl font-bold text-gray-900 leading-tight">CSAO Form Processor</h1>
+              <p className="text-sm text-gray-500">Approved form emails → Google Sheets</p>
+            </div>
           </div>
           {user && <UserProfile user={user} onLogout={handleLogout} />}
-        </div>
+        </header>
 
         {!user ? (
-          <div className="text-center py-16">
-            <h2 className="text-xl font-medium text-gray-800 mb-2">Welcome</h2>
-            <p className="text-gray-500 mb-6">Sign in to get started.</p>
-            <Button onClick={() => login()}>Sign in with Google</Button>
+          <div className="text-center py-14">
+            <h2 className="text-xl font-semibold text-gray-900 mb-2">Welcome</h2>
+            <p className="text-gray-500 mb-8 max-w-sm mx-auto">
+              Sign in with the CSAO Google account that receives the form approval emails.
+            </p>
+            <Button size="lg" onClick={() => login()}>Sign in with Google</Button>
+            {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
           </div>
         ) : (
-          <div className="mt-8 space-y-6">
-            <div>
-              <label htmlFor="formType" className="block font-semibold text-gray-800 mb-2">
-                Form Type
-              </label>
-              <select
-                id="formType"
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
-                value={formType}
-                onChange={(e) => applyFormType(e.target.value as FormTypeId)}
-                disabled={isProcessing}
-              >
-                {FORM_TYPE_OPTIONS.map((o) => (
-                  <option key={o.id} value={o.id}>{o.label}</option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-gray-500">
+          <div className="mt-8 space-y-7">
+            {/* Form type */}
+            <section>
+              <h2 className="text-sm font-semibold text-gray-800 mb-2">Form type</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2" role="radiogroup" aria-label="Form type">
+                {FORM_TYPE_OPTIONS.map((o) => {
+                  const selected = formType === o.id;
+                  return (
+                    <button
+                      key={o.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      title={o.label}
+                      disabled={isProcessing}
+                      onClick={() => !selected && applyFormType(o.id)}
+                      className={`text-left rounded-xl border px-3 py-2.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed ${selected
+                        ? 'border-brand-600 bg-brand-50 ring-1 ring-brand-600'
+                        : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50 disabled:opacity-50'}`}
+                    >
+                      <span className={`block text-sm font-semibold ${selected ? 'text-brand-800' : 'text-gray-900'}`}>{o.shortLabel}</span>
+                      <span className="block text-[11px] text-gray-500 truncate">{o.hint}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
                 {formType === 'poa'
-                  ? 'Rows are written to monthly tabs based on the activity dates.'
-                  : 'Rows are appended to a single running list in the selected sheet.'}
+                  ? 'POA rows are written to monthly tabs based on the activity dates.'
+                  : `${shortLabel} rows are added to one running list in the selected sheet.`}
               </p>
-            </div>
+            </section>
 
-            <div>
-              <label htmlFor="spreadsheetId" className="block font-semibold text-gray-800 mb-2">
-                Target Google Sheet ({formTypeShortLabel(formType)})
-              </label>
+            {/* Target sheet */}
+            <section>
+              <h2 className="text-sm font-semibold text-gray-800 mb-2">
+                <label htmlFor="spreadsheetId">Target sheet for {shortLabel}</label>
+              </h2>
               {editingSheet ? (
                 <>
                   <div className="flex gap-2">
@@ -555,256 +530,154 @@ const Home: React.FC = () => {
                       id="spreadsheetId"
                       value={spreadsheetInput}
                       onChange={handleSpreadsheetInputChange}
-                      placeholder="Paste Google Sheet URL (or use Browse)"
+                      placeholder="Paste a Google Sheet link"
                       aria-describedby="sheet-helper"
                     />
-                    <Button type="button" onClick={fetchSheets} disabled={isLoadingSheets}>
-                      {isLoadingSheets ? 'Loading...' : 'Browse'}
+                    <Button variant="secondary" onClick={fetchSheets} disabled={isLoadingSheets}>
+                      {isLoadingSheets ? <Spinner /> : 'Browse'}
                     </Button>
                   </div>
-                  <div id="sheet-helper" className="mt-1 space-y-1">
-                    {spreadsheetInput && !spreadsheetId && (
-                      <p className="text-xs text-amber-700 bg-amber-100/70 rounded px-2 py-1">Paste a valid Google Sheet link (https://docs.google.com/spreadsheets/d/...).</p>
+                  <div id="sheet-helper" className="mt-1.5 text-xs">
+                    {spreadsheetInput && !spreadsheetId && !sheetTitleLoading && (
+                      <p className="text-amber-700">Paste a full Google Sheet link (https://docs.google.com/spreadsheets/d/…).</p>
                     )}
-                    {sheetTitleLoading && (
-                      <p className="text-xs text-blue-700 bg-blue-100/70 rounded px-2 py-1">Fetching sheet details...</p>
-                    )}
+                    {sheetTitleLoading && <p className="text-gray-500">Checking sheet…</p>}
+                    {!spreadsheetInput && <p className="text-gray-500">Use a separate spreadsheet for each form type.</p>}
                   </div>
                 </>
               ) : (
-                <div className="flex items-center justify-between gap-4 bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
-                  <div className="min-w-0">
-                    <p className="text-sm text-gray-500 leading-tight">Selected Sheet</p>
-                    <p className="font-medium text-gray-900 truncate" title={sheetTitle}>{sheetTitle || 'Untitled Sheet'}</p>
+                <div className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white px-3 py-2.5">
+                  <SheetIcon />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-gray-900 truncate" title={sheetTitle}>{sheetTitle || 'Untitled sheet'}</p>
+                    <p className="text-xs text-gray-500">Google Sheet</p>
                   </div>
-                  <div className="flex gap-2">
-
-                    {spreadsheetId && (
-                      <Button
-                        type="button"
-                        onClick={() => window.open(`https://docs.google.com/spreadsheets/d/${spreadsheetId}`, '_blank', 'noopener,noreferrer')}
-                      >
-                        Open Sheet
-                      </Button>
-                    )}
-
-                    <Button type="button" onClick={() => { setEditingSheet(true); setShowSheetPicker(false); }}>Change</Button>
-                  </div>
+                  <a
+                    href={sheetUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm font-semibold text-brand-700 hover:text-brand-800 px-2 py-1.5 rounded-lg hover:bg-brand-50"
+                  >
+                    Open
+                  </a>
+                  <Button variant="ghost" size="sm" onClick={() => { setEditingSheet(true); setShowSheetPicker(false); }} disabled={isProcessing}>
+                    Change
+                  </Button>
                 </div>
               )}
-            </div>
 
-            {showSheetPicker && (
-              <div className="border border-gray-200 rounded-2xl p-3 bg-white shadow-lg max-h-72 overflow-auto space-y-2">
-                <div className="flex justify-between items-center mb-1">
-                  <h4 className="font-semibold text-sm text-gray-800">Your Recent Spreadsheets</h4>
-                  <button
-                    className="text-xs text-gray-500 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400 rounded"
-                    onClick={() => setShowSheetPicker(false)}
-                  >Close</button>
-                </div>
-                {sheets.length === 0 && !isLoadingSheets && (
-                  <p className="text-xs text-gray-500">No spreadsheets found.</p>
-                )}
-                <ul className="space-y-1">
-                  {sheets.map(s => (
-                    <li key={s.id}>
-                      <button
-                        type="button"
-                        onClick={() => handleSelectSheet(s.id, s.name)}
-                        className={`group w-full text-left px-3 py-2 rounded-lg border transition-colors text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 ${spreadsheetId === s.id ? 'bg-blue-50 border-blue-300' : 'bg-gray-50 hover:bg-blue-50 border-gray-200'}`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
+              {showSheetPicker && (
+                <div className="mt-2 border border-gray-200 rounded-xl bg-white shadow-lg overflow-hidden">
+                  <div className="flex justify-between items-center px-3 py-2 border-b border-gray-100 bg-gray-50">
+                    <p className="text-xs font-semibold text-gray-700">Recent spreadsheets</p>
+                    <Button variant="ghost" size="sm" onClick={() => setShowSheetPicker(false)}>Close</Button>
+                  </div>
+                  {sheets.length === 0 && !isLoadingSheets && (
+                    <p className="text-sm text-gray-500 px-3 py-4">No spreadsheets found.</p>
+                  )}
+                  <ul className="max-h-64 overflow-auto divide-y divide-gray-100">
+                    {sheets.map((s) => (
+                      <li key={s.id}>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectSheet(s.id, s.name)}
+                          className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between gap-2 focus:outline-none focus-visible:bg-brand-50 ${spreadsheetId === s.id ? 'bg-brand-50' : 'hover:bg-gray-50'}`}
+                        >
                           <span className="font-medium text-gray-900 truncate" title={s.name}>{s.name}</span>
                           {s.modifiedTime && (
-                            <span className="text-[10px] text-gray-500 whitespace-nowrap">{new Date(s.modifiedTime).toLocaleDateString()}</span>
+                            <span className="text-[11px] text-gray-500 whitespace-nowrap">{new Date(s.modifiedTime).toLocaleDateString()}</span>
                           )}
-                        </div>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="flex items-center space-x-3 mt-4 p-4 bg-gray-100 rounded-2xl">
-              <input
-                type="checkbox"
-                id="dateFilter"
-                className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                checked={useDateFilter}
-                onChange={(e) => setUseDateFilter(e.target.checked)}
-              />
-              <label htmlFor="dateFilter" className="text-sm font-medium text-gray-700">
-                Enable Optimization
-                <span className="text-gray-500 font-normal ml-1">
-                  (Only fetch newer emails)
-                </span>
-              </label>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-3 bg-gray-100 rounded-2xl p-4">
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1">Academic Year Start Month</label>
-                <select
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  value={acadStartMonth}
-                  onChange={(e) => setAcadStartMonth(Number(e.target.value))}
-                >
-                  {['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].slice(1).map((m, i) => (
-                    <option key={m} value={i + 1}>{m}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1">Academic Year Start Year</label>
-                <Input type="number" value={acadStartYear} onChange={(e) => setAcadStartYear(Number(e.target.value))} placeholder="2025" />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1">Manual Earliest Email Date (override)</label>
-                <Input type="date" value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)} />
-              </div>
-              <div className="sm:col-span-3 text-[11px] text-gray-500 leading-snug">
-                Date inference by academic year is disabled to avoid incorrect years. If a date cannot be parsed, the item will be held for your review. Manual date (if set) restricts the Gmail query to messages after that day.
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <Button
-                onClick={handleProcessEmails}
-                disabled={isProcessing || !spreadsheetId}
-                fullWidth
-              >
-                {isProcessing ? 'Processing...' : `Process New ${formTypeShortLabel(formType)} Emails`}
-              </Button>
-            </div>
-
-            {error && (
-              <p className="text-red-600 text-center bg-red-100 p-3 rounded-2xl mt-4">
-                Error: {error}
-              </p>
-            )}
-            {statusMessage && (
-              <p className="text-gray-700 text-center bg-blue-50 p-3 rounded-2xl mt-4">
-                {statusMessage}
-              </p>
-            )}
-
-            {tasks.length > 0 && (() => {
-              const counts = tasks.reduce<Record<string, number>>((acc, t) => {
-                acc[t.status] = (acc[t.status] || 0) + 1; return acc;
-              }, {});
-              const order: EmailTaskStatus[] = ['queued', 'fetching', 'parsing', 'uploading_pdf', 'building_request', 'writing', 'done', 'skipped', 'held', 'error'];
-              return (
-                <div className="mt-8 space-y-4">
-                  <div className="flex flex-wrap gap-3 items-center">
-                    <h3 className="text-lg font-semibold text-gray-800 mr-2">Tasks</h3>
-                    {/* All chip */}
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter(null)}
-                      className={`text-[11px] uppercase tracking-wide px-2 py-1 rounded-full font-medium border transition-colors ${statusFilter === null ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-700 border-gray-300 hover:border-blue-400'}`}
-                      title="Show all tasks"
-                    >
-                      All: {tasks.length}
-                    </button>
-                    {order.filter(k => counts[k]).map((k) => {
-                      const selected = statusFilter === k;
-                      return (
-                        <button
-                          key={k}
-                          type="button"
-                          onClick={() => setStatusFilter(selected ? null : k)}
-                          className={`text-[11px] uppercase tracking-wide px-2 py-1 rounded-full font-medium border transition-colors ${selected ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-700 border-gray-300 hover:border-blue-400'}`}
-                          title={`Filter by ${k.replace('_', ' ')}`}
-                        >
-                          {k.replace('_', ' ')}: {counts[k]}
                         </button>
-                      );
-                    })}
-                    <span className="text-[11px] text-gray-500 ml-auto">{statusFilter ? `Showing: ${statusFilter.replace('_', ' ')}` : 'Showing: All'}</span>
-                  </div>
-                  {counts['held'] && (
-                    <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-sm">
-                      <p className="font-medium mb-1">Action needed: Some items are on hold due to missing or invalid dates.</p>
-                      <p className="text-xs">Please specify the correct Start Date and End Date for each held item in the Google Sheet or the original email, then re-run processing.</p>
-                    </div>
-                  )}
-                  <ul className="flex flex-wrap gap-2">
-                    {(statusFilter ? tasks.filter(t => t.status === statusFilter) : tasks).map((task: EmailTask) => (
-                      <TaskItem
-                        key={task.id}
-                        task={task}
-                        compact
-                        onClick={
-
-                          task.status === 'error' || task.status === 'skipped'
-                            ? () => openErrorDetails(task)
-                            : task.status === 'held'
-                              ? () => openHeldDialog(task)
-                              : undefined
-                        }
-                      />
+                      </li>
                     ))}
                   </ul>
                 </div>
-              );
-            })()}
+              )}
+            </section>
+
+            {/* Options */}
+            <details className="group rounded-xl border border-gray-200 bg-gray-50/60">
+              <summary className="cursor-pointer select-none list-none px-4 py-3 flex items-center justify-between gap-3 text-sm">
+                <span className="font-semibold text-gray-800">Options</span>
+                <span className="text-xs text-gray-500 truncate">
+                  {manualStartDate
+                    ? `Emails since ${new Date(manualStartDate + 'T00:00:00').toLocaleDateString()}`
+                    : useDateFilter ? 'Only new emails' : 'All emails'}
+                  <span className="ml-2 inline-block transition-transform group-open:rotate-90">›</span>
+                </span>
+              </summary>
+              <div className="px-4 pb-4 space-y-4">
+                <label className="flex items-start gap-3 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 rounded border-gray-300 accent-brand-600"
+                    checked={useDateFilter}
+                    onChange={(e) => setUseDateFilter(e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium">Only fetch new emails</span>
+                    <span className="block text-xs text-gray-500">Skips emails already recorded in the {shortLabel} log.</span>
+                  </span>
+                </label>
+                <div>
+                  <label htmlFor="manualStartDate" className="block text-sm font-medium text-gray-700 mb-1">Earliest email date</label>
+                  <div className="flex gap-2 items-center max-w-xs">
+                    <Input id="manualStartDate" type="date" value={manualStartDate} onChange={(e) => setManualStartDate(e.target.value)} />
+                    {manualStartDate && <Button variant="ghost" size="sm" onClick={() => setManualStartDate('')}>Clear</Button>}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">Optional. Only emails received on or after this day are processed (overrides the option above).</p>
+                </div>
+              </div>
+            </details>
+
+            <Button size="lg" fullWidth onClick={handleProcessEmails} disabled={isProcessing || !spreadsheetId}>
+              {isProcessing ? (<><Spinner /> Processing…</>) : `Process new ${shortLabel} emails`}
+            </Button>
+
+            {error && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
+                {error}
+              </div>
+            )}
+
+            {!hasRun && statusMessage && (
+              <p className="text-sm text-gray-600 text-center">{statusMessage}</p>
+            )}
+
+            {/* Run progress & results */}
+            {hasRun && (
+              <RunResults
+                tasks={tasks}
+                isProcessing={isProcessing}
+                statusMessage={statusMessage}
+                statusFilter={statusFilter}
+                onFilterChange={setStatusFilter}
+                sheetUrl={sheetUrl}
+                taskAction={taskAction}
+              />
+            )}
           </div>
         )}
       </Card>
-      <Modal open={isFolderDialogOpen} onClose={() => setIsFolderDialogOpen(false)} title="Select Upload Folder" maxWidthClass="max-w-2xl">
-        <div className="space-y-6">
-          <form onSubmit={handleCreateFolder} className="flex gap-2 items-end flex-wrap">
-            <div className="flex-1 min-w-[220px]">
-              <label className="block text-xs font-medium text-gray-600 mb-1">New Folder Name</label>
-              <Input value={newFolderName} onChange={e => setNewFolderName(e.target.value)} placeholder="e.g., POA PDFs" />
-            </div>
-            <Button type="submit" disabled={!newFolderName.trim()}>Create</Button>
-          </form>
-          {folderError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{folderError}</p>}
-          <div>
-            <p className="text-xs font-medium text-gray-600 mb-2">Existing Folders</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-auto pr-1">
-              {isLoadingFolders && <p className="text-sm text-gray-500">Loading folders...</p>}
-              {!isLoadingFolders && driveFolders.length === 0 && (
-                <p className="text-sm text-gray-500">No folders found.</p>
-              )}
-              {driveFolders.map(f => (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => selectFolder(f.id, f.name)}
-                  className={`group border rounded-xl px-3 py-2 text-left hover:border-blue-400 hover:bg-blue-50 transition-colors ${uploadFolderId === f.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white'}`}
-                >
-                  <p className="font-medium text-sm text-gray-800 truncate" title={f.name}>{f.name}</p>
-                  {f.modifiedTime && <p className="text-[10px] text-gray-500 mt-1">Updated {new Date(f.modifiedTime).toLocaleDateString()}</p>}
-                  {uploadFolderId === f.id && <p className="text-[10px] text-blue-600 mt-1 font-semibold">Selected</p>}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex justify-end gap-3 pt-2">
-            <Button type="button" onClick={() => setIsFolderDialogOpen(false)}>Close</Button>
-          </div>
-        </div>
-      </Modal>
-      <Modal open={isErrorDetailsOpen} onClose={() => setIsErrorDetailsOpen(false)} title="Email Details" maxWidthClass="max-w-4xl">
+      <Modal open={isErrorDetailsOpen} onClose={() => setIsErrorDetailsOpen(false)} title="Email preview" maxWidthClass="max-w-4xl">
+        {detailsTask?.error && (
+          <p className={`mb-3 rounded-lg px-3 py-2 text-sm ${detailsTask.status === 'error' ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
+            {detailsTask.status === 'error' ? 'Error: ' : 'Skipped: '}{detailsTask.error}
+          </p>
+        )}
         {isLoadingErrorDetails && (
           <p className="text-sm text-gray-600">Loading message…</p>
         )}
         {!isLoadingErrorDetails && errorEmail && (
           <div className="space-y-3">
             <div>
-              <p className="text-sm text-gray-500">Subject</p>
               <p className="text-base font-medium text-gray-900">{errorEmail.subject}</p>
+              {(errorEmail.from || errorEmail.date) && (
+                <p className="text-xs text-gray-500">
+                  {errorEmail.from}{errorEmail.from && errorEmail.date ? ' · ' : ''}{errorEmail.date && new Date(errorEmail.date).toLocaleString()}
+                </p>
+              )}
             </div>
-            {(errorEmail.from || errorEmail.date) && (
-              <div className="text-xs text-gray-600">
-                {errorEmail.from && <p><span className="font-semibold">From:</span> {errorEmail.from}</p>}
-                {errorEmail.date && <p><span className="font-semibold">Date:</span> {new Date(errorEmail.date).toLocaleString()}</p>}
-              </div>
-            )}
             {errorEmail.html ? (
               <div className="border rounded-lg overflow-hidden">
                 <iframe
@@ -815,22 +688,34 @@ const Home: React.FC = () => {
                 />
               </div>
             ) : (
-              <pre className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-auto max-h-[60vh]">
+              <pre className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-auto max-h-[60vh] whitespace-pre-wrap">
                 {errorEmail.snippet || 'No content available.'}
               </pre>
             )}
-            <p className="text-xs text-gray-500">Tip: Use this preview to copy the correct dates and update your sheet or reply to the original email, then re-run processing.</p>
           </div>
         )}
       </Modal>
-      <Modal open={isHeldDialogOpen} onClose={() => setIsHeldDialogOpen(false)} title="Set Dates to Reprocess" maxWidthClass="max-w-4xl">
+      <Modal open={isHeldDialogOpen} onClose={() => setIsHeldDialogOpen(false)} title="Set activity dates" maxWidthClass="max-w-4xl">
         <form onSubmit={submitHeldDates} className="space-y-4">
           <div className="text-sm text-gray-700">
-            <p className="font-medium">{heldTask?.subject || 'Held Task'}</p>
-            <p className="text-xs text-gray-500">Specify Start and End dates for this activity and we will write it to the appropriate monthly sheet(s).</p>
+            <p className="font-medium text-gray-900">
+              {heldTask?.organization && heldTask?.title ? `${heldTask.organization} — ${heldTask.title}` : heldTask?.title || heldTask?.subject || 'Held email'}
+            </p>
+            <p className="text-xs text-gray-500">Enter the Start and End dates from the email below; the activity will be written to the matching monthly tab(s).</p>
           </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="heldStartDate" className="block text-xs font-semibold text-gray-600 mb-1">Start date</label>
+              <Input id="heldStartDate" type="date" value={heldStartDate} onChange={(e) => setHeldStartDate(e.target.value)} required />
+            </div>
+            <div>
+              <label htmlFor="heldEndDate" className="block text-xs font-semibold text-gray-600 mb-1">End date</label>
+              <Input id="heldEndDate" type="date" value={heldEndDate} onChange={(e) => setHeldEndDate(e.target.value)} required />
+            </div>
+          </div>
+          {heldError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{heldError}</p>}
           <div className="space-y-2">
-            <p className="text-xs font-medium text-gray-600">Email Preview</p>
+            <p className="text-xs font-medium text-gray-600">Email</p>
             {isLoadingHeldPreview && (
               <p className="text-sm text-gray-600">Loading message…</p>
             )}
@@ -845,26 +730,15 @@ const Home: React.FC = () => {
                   />
                 </div>
               ) : (
-                <pre className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-auto max-h-[45vh]">
+                <pre className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-auto max-h-[45vh] whitespace-pre-wrap">
                   {heldPreviewSnippet}
                 </pre>
               )
             )}
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-gray-600 mb-1">Start Date</label>
-              <Input type="date" value={heldStartDate} onChange={(e) => setHeldStartDate(e.target.value)} required />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-gray-600 mb-1">End Date</label>
-              <Input type="date" value={heldEndDate} onChange={(e) => setHeldEndDate(e.target.value)} required />
-            </div>
-          </div>
-          {heldError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{heldError}</p>}
           <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" onClick={() => setIsHeldDialogOpen(false)} disabled={heldSubmitting}>Cancel</Button>
-            <Button type="submit" disabled={heldSubmitting}>{heldSubmitting ? 'Reprocessing…' : 'Reprocess'}</Button>
+            <Button variant="secondary" onClick={() => setIsHeldDialogOpen(false)} disabled={heldSubmitting}>Cancel</Button>
+            <Button type="submit" disabled={heldSubmitting}>{heldSubmitting ? (<><Spinner /> Saving…</>) : 'Add to sheet'}</Button>
           </div>
         </form>
       </Modal>
