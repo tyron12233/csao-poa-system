@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1550" viewBox="0 0 1400 1550" font-family="Inter, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b4558"/>
+    </marker>
+    <style>
+      .title { font-size: 34px; font-weight: 700; fill: #1a1f2b; }
+      .subtitle { font-size: 17px; fill: #5b6475; }
+      .section { font-size: 13px; font-weight: 700; letter-spacing: 1.5px; fill: #5b6475; }
+      .h { font-size: 16px; font-weight: 700; fill: #1a1f2b; }
+      .h-lg { font-size: 20px; font-weight: 700; fill: #1a1f2b; }
+      .t { font-size: 14px; fill: #1a1f2b; }
+      .m { font-size: 13px; fill: #5b6475; }
+      .lbl { font-size: 14px; font-weight: 600; fill: #1a1f2b; }
+      .num { font-size: 13px; font-weight: 700; fill: #ffffff; }
+      .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 14px; fill: #1a1f2b; }
+      .key { font-size: 14px; font-weight: 700; fill: #1a1f2b; }
+      .key-mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13.5px; font-weight: 700; fill: #1a1f2b; }
+      .d { font-size: 13.5px; fill: #4a5263; }
+      .arrow { stroke: #3b4558; stroke-width: 2; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="1550" fill="#ffffff"/>
+
+  <!-- Header -->
+  <text x="60" y="72" class="title">CSAO POA System: how data flows</text>
+  <text x="60" y="106" class="subtitle">As of 20 October 2026 · All processing happens in the staff member's own browser, using the school's Google account</text>
+
+  <text x="60" y="160" class="section">AT A GLANCE</text>
+
+  <!-- Staff browser -->
+  <rect x="60" y="260" width="380" height="340" rx="14" fill="#ecf8f1" stroke="#9fd6b6" stroke-width="1.5"/>
+  <text x="88" y="302" class="h-lg">CSAO staff member's browser</text>
+  <rect x="88" y="318" width="222" height="28" rx="14" fill="#1f7a4d"/>
+  <text x="199" y="337" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">All processing happens here</text>
+  <g class="t">
+    <text x="88" y="392"><tspan fill="#1f7a4d" font-weight="700">✓</tspan>  Reads completed-form emails</text>
+    <text x="88" y="426"><tspan fill="#1f7a4d" font-weight="700">✓</tspan>  Extracts the request details</text>
+    <text x="88" y="460"><tspan fill="#1f7a4d" font-weight="700">✓</tspan>  Writes rows to the CSAO sheet</text>
+    <text x="88" y="494"><tspan fill="#1f7a4d" font-weight="700">✓</tspan>  Shows the printable PDF view</text>
+  </g>
+  <text x="88" y="572" class="m">Runs only while the page is open in the browser</text>
+
+  <!-- Google Workspace group -->
+  <rect x="650" y="190" width="370" height="440" rx="16" fill="#eef4ff" stroke="#b9cdf5" stroke-width="1.5"/>
+  <text x="676" y="226" class="h">School's Google Workspace</text>
+
+  <rect x="680" y="260" width="310" height="90" rx="10" fill="#ffffff" stroke="#c9d7f2"/>
+  <text x="702" y="298" class="h">Google sign-in</text>
+  <text x="702" y="322" class="m">Issues a short-lived access pass</text>
+
+  <rect x="680" y="385" width="310" height="90" rx="10" fill="#ffffff" stroke="#c9d7f2"/>
+  <text x="702" y="423" class="h">Gmail</text>
+  <text x="702" y="447" class="m">Where formapprovals emails arrive</text>
+
+  <rect x="680" y="510" width="310" height="90" rx="10" fill="#ffffff" stroke="#c9d7f2"/>
+  <text x="702" y="548" class="h">Google Sheets</text>
+  <text x="702" y="572" class="m">The CSAO record sheets</text>
+
+  <!-- formapprovals -->
+  <rect x="1100" y="365" width="240" height="130" rx="12" fill="#fff6e8" stroke="#f0cf98" stroke-width="1.5"/>
+  <text x="1122" y="400" class="h">formapprovals.com</text>
+  <text x="1122" y="426" class="m">Online approval forms</text>
+  <text x="1122" y="446" class="m">Emails CSAO when a</text>
+  <text x="1122" y="464" class="m">request is complete</text>
+  <line x1="1100" y1="430" x2="998" y2="430" class="arrow" marker-end="url(#arrow)"/>
+  <text x="1049" y="420" text-anchor="middle" class="m">email</text>
+
+  <!-- Arrow 1: sign in -->
+  <circle cx="560" cy="265" r="12" fill="#1a1f2b"/><text x="560" y="270" text-anchor="middle" class="num">1</text>
+  <text x="560" y="293" text-anchor="middle" class="lbl">Sign in (school account)</text>
+  <line x1="448" y1="305" x2="672" y2="305" class="arrow" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="560" y="326" text-anchor="middle" class="m">access stays in the browser</text>
+
+  <!-- Arrow 2: read emails -->
+  <circle cx="560" cy="390" r="12" fill="#1a1f2b"/><text x="560" y="395" text-anchor="middle" class="num">2</text>
+  <text x="560" y="418" text-anchor="middle" class="lbl">Read emails</text>
+  <line x1="672" y1="430" x2="448" y2="430" class="arrow" marker-end="url(#arrow)"/>
+  <text x="560" y="451" text-anchor="middle" class="m">read-only</text>
+
+  <!-- Arrow 3: write rows -->
+  <circle cx="560" cy="515" r="12" fill="#1a1f2b"/><text x="560" y="520" text-anchor="middle" class="num">3</text>
+  <text x="560" y="543" text-anchor="middle" class="lbl">Add rows</text>
+  <line x1="448" y1="555" x2="672" y2="555" class="arrow" marker-end="url(#arrow)"/>
+  <text x="560" y="576" text-anchor="middle" class="m">to the CSAO sheet</text>
+
+  <!-- Vercel -->
+  <rect x="60" y="700" width="380" height="140" rx="14" fill="#f3f4f6" stroke="#cfd3da" stroke-width="1.5"/>
+  <text x="88" y="740" class="h">Vercel (website host)</text>
+  <text x="88" y="768" class="t">Delivers the app's code to the browser</text>
+  <text x="88" y="792" class="m">Never receives emails, sheet data,</text>
+  <text x="88" y="812" class="m">form details or the Google sign-in</text>
+
+  <!-- Arrow 4: app files -->
+  <line x1="250" y1="700" x2="250" y2="608" class="arrow" marker-end="url(#arrow)"/>
+  <circle cx="280" cy="650" r="12" fill="#1a1f2b"/><text x="280" y="655" text-anchor="middle" class="num">4</text>
+  <text x="302" y="655" class="lbl">App files only, one way</text>
+
+  <!-- PDF links -->
+  <rect x="520" y="700" width="820" height="140" rx="14" fill="#ffffff" stroke="#dcdfe4" stroke-width="1.5"/>
+  <circle cx="548" cy="732" r="12" fill="#1a1f2b"/><text x="548" y="737" text-anchor="middle" class="num">5</text>
+  <text x="570" y="738" class="h">Printable PDF links</text>
+  <text x="548" y="764" class="t">Form details sit after the "#" in the link. Browsers never send that part to any server.</text>
+  <rect x="548" y="778" width="213" height="32" rx="6" fill="#f3f4f6" stroke="#cfd3da"/>
+  <text x="654" y="799" text-anchor="middle" class="mono">csao-poa.vercel.app/pdf</text>
+  <rect x="761" y="778" width="350" height="32" rx="6" fill="#ecf8f1" stroke="#9fd6b6"/>
+  <text x="936" y="799" text-anchor="middle" class="mono">#requestNumber=…&amp;organization=…</text>
+  <text x="654" y="828" text-anchor="middle" class="m">goes to the host</text>
+  <text x="936" y="828" text-anchor="middle" class="m" font-weight="600" fill="#1f7a4d">stays in the browser</text>
+
+  <!-- Not in this system -->
+  <text x="60" y="902" class="section">NOT PART OF THIS SYSTEM</text>
+  <g>
+    <rect x="60" y="918" width="305" height="40" rx="20" fill="#f7f7f8" stroke="#dcdfe4"/>
+    <text x="212" y="943" text-anchor="middle" class="t"><tspan fill="#c2410c" font-weight="700">✕</tspan>  No database</text>
+    <rect x="385" y="918" width="305" height="40" rx="20" fill="#f7f7f8" stroke="#dcdfe4"/>
+    <text x="537" y="943" text-anchor="middle" class="t"><tspan fill="#c2410c" font-weight="700">✕</tspan>  No server-side code</text>
+    <rect x="710" y="918" width="305" height="40" rx="20" fill="#f7f7f8" stroke="#dcdfe4"/>
+    <text x="862" y="943" text-anchor="middle" class="t"><tspan fill="#c2410c" font-weight="700">✕</tspan>  No stored copies of emails</text>
+    <rect x="1035" y="918" width="305" height="40" rx="20" fill="#f7f7f8" stroke="#dcdfe4"/>
+    <text x="1187" y="943" text-anchor="middle" class="t"><tspan fill="#c2410c" font-weight="700">✕</tspan>  No analytics or trackers</text>
+  </g>
+
+  <line x1="60" y1="1005" x2="1340" y2="1005" stroke="#e3e6eb" stroke-width="1.5"/>
+  <text x="60" y="1045" class="section">TECHNICAL DETAIL · FOR IT AND DATA PROTECTION REVIEW</text>
+
+  <!-- Column 1: Google access -->
+  <rect x="60" y="1065" width="400" height="400" rx="12" fill="#fafbfc" stroke="#e3e6eb"/>
+  <text x="84" y="1102" class="h">Google access requested</text>
+  <text x="84" y="1138" class="key-mono">gmail.readonly</text>
+  <text x="84" y="1158" class="d">Read-only. The app only searches</text>
+  <text x="84" y="1177" class="d">formapprovals emails; it cannot send,</text>
+  <text x="84" y="1196" class="d">delete or change anything.</text>
+  <text x="84" y="1230" class="key-mono">spreadsheets</text>
+  <text x="84" y="1250" class="d">Used to add rows to the selected CSAO</text>
+  <text x="84" y="1269" class="d">sheet.</text>
+  <text x="84" y="1303" class="key-mono">drive.metadata.readonly</text>
+  <text x="84" y="1323" class="d">Lists sheet names for the picker.</text>
+  <text x="84" y="1342" class="d">Cannot open file contents.</text>
+  <text x="84" y="1376" class="key">Access pass</text>
+  <text x="84" y="1396" class="d">Issued by Google directly to the browser.</text>
+  <text x="84" y="1415" class="d">Expires within 1 hour. Never sent to</text>
+  <text x="84" y="1434" class="d">Vercel or any other server.</text>
+
+  <!-- Column 2: Hosting -->
+  <rect x="500" y="1065" width="400" height="400" rx="12" fill="#fafbfc" stroke="#e3e6eb"/>
+  <text x="524" y="1102" class="h">Hosting (Vercel)</text>
+  <text x="524" y="1138" class="key">Static files only</text>
+  <text x="524" y="1158" class="d">All 4 pages are built as static files</text>
+  <text x="524" y="1177" class="d">(Next.js build output: "○ Static").</text>
+  <text x="524" y="1211" class="key">No backend</text>
+  <text x="524" y="1231" class="d">No API routes, server functions or</text>
+  <text x="524" y="1250" class="d">databases exist in the codebase.</text>
+  <text x="524" y="1284" class="key">What Vercel sees</text>
+  <text x="524" y="1304" class="d">Standard web request info: IP address,</text>
+  <text x="524" y="1323" class="d">browser type and page address</text>
+  <text x="524" y="1342" class="d">(without the "#" part).</text>
+  <text x="524" y="1376" class="key">What Vercel never sees</text>
+  <text x="524" y="1396" class="d">The Google sign-in, email contents,</text>
+  <text x="524" y="1415" class="d">sheet data or form details.</text>
+
+  <!-- Column 3: Personal data -->
+  <rect x="940" y="1065" width="400" height="400" rx="12" fill="#fafbfc" stroke="#e3e6eb"/>
+  <text x="964" y="1102" class="h">Personal data handled</text>
+  <text x="964" y="1138" class="key">Source</text>
+  <text x="964" y="1158" class="d">CSAO Gmail (formapprovals.com</text>
+  <text x="964" y="1177" class="d">notification emails).</text>
+  <text x="964" y="1211" class="key">Fields used</text>
+  <text x="964" y="1231" class="d">Organization, activity title, dates, venue,</text>
+  <text x="964" y="1250" class="d">requestor and admin emails, facilitator</text>
+  <text x="964" y="1269" class="d">and participant names, budget, approvals.</text>
+  <text x="964" y="1303" class="key">Stored in</text>
+  <text x="964" y="1323" class="d">The CSAO Google Sheet only.</text>
+  <text x="964" y="1357" class="key">PDF view</text>
+  <text x="964" y="1377" class="d">Rebuilt in the browser from the link's</text>
+  <text x="964" y="1396" class="d">"#" part, which is never sent to servers</text>
+  <text x="964" y="1415" class="d">(URL standard, RFC 3986 §3.5).</text>
+
+  <text x="60" y="1512" class="m">Based on a review of the application source code and production build · 20 October 2026</text>
+</svg>

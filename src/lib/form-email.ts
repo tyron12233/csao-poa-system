@@ -149,17 +149,27 @@ export class FieldReader {
 }
 
 // --- Printable view URL (/pdf/form) ---
+// Data goes in the #fragment, which browsers never send to the server (see readPdfParams).
 export function buildFormPdfUrl(baseUrl: string, email: FormEmail): string {
+    const params = new URLSearchParams();
+    params.set('requestNumber', email.requestNumber);
+    params.set('requestUrl', email.requestUrl);
+    params.set('requestDate', email.requestDate);
+    params.set('headerTitle', email.headerTitle);
+    params.set('statusLabel', email.statusLabel);
+    params.set('approvalHistory', JSON.stringify(email.approvalHistory));
+    params.set('fields', JSON.stringify(email.fields));
+    params.set('adminEmail', email.adminEmail);
     const url = new URL(baseUrl);
-    url.searchParams.set('requestNumber', email.requestNumber);
-    url.searchParams.set('requestUrl', email.requestUrl);
-    url.searchParams.set('requestDate', email.requestDate);
-    url.searchParams.set('headerTitle', email.headerTitle);
-    url.searchParams.set('statusLabel', email.statusLabel);
-    url.searchParams.set('approvalHistory', JSON.stringify(email.approvalHistory));
-    url.searchParams.set('fields', JSON.stringify(email.fields));
-    url.searchParams.set('adminEmail', email.adminEmail);
+    url.hash = params.toString();
     return url.toString();
+}
+
+// Printable views read their data from the #fragment. Links written before the switch carry it
+// in the ?query instead, so fall back to that to keep existing sheet links working.
+export function readPdfParams(): URLSearchParams {
+    const hash = window.location.hash.slice(1);
+    return new URLSearchParams(hash || window.location.search);
 }
 
 export function formEmailFromSearchParams(params: URLSearchParams): FormEmail {

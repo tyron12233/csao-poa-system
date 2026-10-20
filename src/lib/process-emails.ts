@@ -418,9 +418,9 @@ export function buildPdfSearchParams(props: POAEmailProps): URLSearchParams {
 }
 
 export function buildPdfUrl(baseUrl: string, props: POAEmailProps): string {
+    // Data goes in the #fragment, which browsers never send to the server (see readPdfParams).
     const url = new URL(baseUrl);
-    const params = buildPdfSearchParams(props);
-    params.forEach((v, k) => url.searchParams.set(k, v));
+    url.hash = buildPdfSearchParams(props).toString();
     return url.toString();
 }
 
@@ -684,6 +684,18 @@ export type ProcessEmailsParams = {
     callbacks: Callbacks;
 };
 
+// PDF links used to carry their data in the ?query, which reaches the server; rewrite them to the
+// #fragment form. Best-effort: a failure here must never block processing.
+async function upgradeLegacyPdfLinks(gapi: any, spreadsheetId: string) {
+    const host = new URL(PDF_BASE_URL).host.replace(/\./g, '\\.');
+    try {
+        await gapi.client.sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: { requests: [{ findReplace: { find: `(${host}/pdf(?:/form)?)\\?`, replacement: '$1#', searchByRegex: true, includeFormulas: true, allSheets: true } }] },
+        });
+    } catch (_) { }
+}
+
 // Quoted A1 sheet reference, safe for names with spaces or punctuation.
 const a1 = (sheetName: string, range?: string) => `'${sheetName.replace(/'/g, "''")}'${range ? `!${range}` : ''}`;
 
@@ -702,6 +714,7 @@ export async function processEmails(gapi: any, params: ProcessEmailsParams): Pro
         listConfig ? generateListRowRequests(sheetId, rowIndex, row, listConfig.columns) : generateRowRequests(sheetId, rowIndex, row);
 
     console.log(`Starting ${formType} email processing for sender: ${senderEmail}, spreadsheetId: ${spreadsheetId}, uploadFolderId: ${uploadFolderId}`);
+    await upgradeLegacyPdfLinks(gapi, spreadsheetId);
     // --- Phase 1: Fetch emails ---
     let gmailQuery = listConfig
         ? `from:${senderEmail} "The request is now complete." "${listConfig.gmailPhrase}"`

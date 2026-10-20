@@ -1,11 +1,11 @@
 "use client";
 
-import { useSearchParams } from "next/navigation";
 import { useEffect, useRef } from "react";
+import { readPdfParams } from "../../lib/form-email";
 import POAEmail, { buildPOAEmailHtml, POAEmailProps } from "./poa";
 
 export default function PdfClient() {
-    const searchParams = useSearchParams();
+    const searchParams = readPdfParams();
     const contentRef = useRef<HTMLIFrameElement>(null);
 
     const props: POAEmailProps = {
@@ -60,6 +60,9 @@ export default function PdfClient() {
         <iframe
             ref={contentRef}
             style={{ width: "100%", height: "100vh", border: "none" }}
+            // No allow-scripts: data comes from URL params, so the rendered email must never run code.
+            // allow-same-origin lets us call print(); allow-modals lets the print dialog open.
+            sandbox="allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"
             srcDoc={html}
         />
     );

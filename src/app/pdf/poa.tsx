@@ -61,12 +61,18 @@ export interface POAEmailProps {
 }
 
 function escapeHtml(str: string): string {
-    return str
+    return String(str ?? "")
         .replaceAll(/&/g, "&amp;")
         .replaceAll(/</g, "&lt;")
         .replaceAll(/>/g, "&gt;")
         .replaceAll(/\"/g, "&quot;")
         .replaceAll(/'/g, "&#39;");
+}
+
+// Only allow link schemes that came from the original email; the data arrives via URL params.
+function safeHref(url: string): string {
+    const trimmed = String(url ?? "").trim();
+    return /^(https?:|mailto:)/i.test(trimmed) ? escapeHtml(trimmed) : "#";
 }
 
 function brJoin(items: string[]) {
@@ -108,7 +114,7 @@ function renderParticipantsList(list: string[]) {
 function renderInvitationLinks(links: InvitationLink[]) {
     if (!links.length) return "";
     return links
-        .map((l, idx) => `<a href="${l.url}">${escapeHtml(l.label || `File Upload ${idx + 1
+        .map((l, idx) => `<a href="${safeHref(l.url)}">${escapeHtml(l.label || `File Upload ${idx + 1
             }`)}</a>`)
         .join("<br>");
 }
@@ -139,7 +145,7 @@ export function buildPOAEmailHtml(props: POAEmailProps) {
     </style>
   `;
 
-    const reqNumberDisplay = `#${props.requestNumber}`;
+    const reqNumberDisplay = `#${escapeHtml(String(props.requestNumber ?? ""))}`;
     const approvalRows = renderApprovalRows(props.approvalHistory || []);
     const objectivesHtml = numberedBrJoin(props.objectives || []);
     const mechanicsHtml = numberedBrJoin(props.mechanics || []);
@@ -161,7 +167,7 @@ export function buildPOAEmailHtml(props: POAEmailProps) {
             <tbody><tr style="box-sizing:border-box;font-size:14px;margin:0">
               <td class="content-wrap" style="font-size:15px;text-align:center;padding:20px 0 0 0">
                 REQUEST
-                <a href="${props.requestUrl}">${reqNumberDisplay}</a>
+                <a href="${safeHref(props.requestUrl)}">${reqNumberDisplay}</a>
                 | ${escapeHtml(props.requestDate)}
                 <br>
                 <table width="100%" cellpadding="0" cellspacing="0">
@@ -197,12 +203,12 @@ export function buildPOAEmailHtml(props: POAEmailProps) {
                               <table class="response-items" cellpadding="0" cellspacing="0" style="width:100%">
                                 <tbody>
                                   <tr><td class="response-items-col1" style="box-sizing:border-box;vertical-align:top;border-top-width:1px;border-top-color:#f4f4f4;border-top-style:solid;margin:0;padding:5px 0;min-width:130px">Requestor:</td>
-                                  <td class="response-items-col2" style="box-sizing:border-box;vertical-align:top;border-top-width:1px;border-top-color:#f4f4f4;border-top-style:solid;margin:0;padding:5px 0 0 10px;min-width:130px"><a href="mailto:${props.requestorEmail}">${escapeHtml(
+                                  <td class="response-items-col2" style="box-sizing:border-box;vertical-align:top;border-top-width:1px;border-top-color:#f4f4f4;border-top-style:solid;margin:0;padding:5px 0 0 10px;min-width:130px"><a href="${safeHref(`mailto:${props.requestorEmail}`)}">${escapeHtml(
         props.requestorEmail
     )}</a></td></tr>
 
                                   <tr><td class="response-items-col1" style="box-sizing:border-box;vertical-align:top;border-top-width:1px;border-top-color:#f4f4f4;border-top-style:solid;margin:0;padding:5px 0;min-width:130px">E-mail Address:</td>
-                                  <td class="response-items-col2" style="box-sizing:border-box;vertical-align:top;border-top-width:1px;border-top-color:#f4f4f4;border-top-style:solid;margin:0;padding:5px 0 0 10px;min-width:130px"><a href="mailto:${props.emailAddress}">${escapeHtml(
+                                  <td class="response-items-col2" style="box-sizing:border-box;vertical-align:top;border-top-width:1px;border-top-color:#f4f4f4;border-top-style:solid;margin:0;padding:5px 0 0 10px;min-width:130px"><a href="${safeHref(`mailto:${props.emailAddress}`)}">${escapeHtml(
         props.emailAddress
     )}</a></td></tr>
 
@@ -332,7 +338,7 @@ export function buildPOAEmailHtml(props: POAEmailProps) {
                     <td>
                       This is an automated email sent by <a href="https://formapprovals.com">formapprovals.com</a>; do
                       not reply to or forward this email. You are receiving this email because you are a workflow participant of this
-                      request. Your form administrator is <a href="mailto:${props.adminEmail}">${escapeHtml(
+                      request. Your form administrator is <a href="${safeHref(`mailto:${props.adminEmail}`)}">${escapeHtml(
         props.adminEmail
     )}</a>
                     </td>
